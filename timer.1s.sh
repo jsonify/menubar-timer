@@ -1,6 +1,6 @@
 #!/bin/bash
 # <xbar.title>Menu Bar Timer</xbar.title>
-# <xbar.version>v3.0</xbar.version>
+# <xbar.version>v3.1</xbar.version>
 # <xbar.author>Jason Rueckert</xbar.author>
 # <xbar.author.github>jsonify</xbar.author.github>
 # <xbar.desc>Countdown timer that rings and grabs focus when it's done. Inspired by fferri/bitbar-countdown-timer.</xbar.desc>
@@ -14,7 +14,8 @@
 # ---- Settings -------------------------------------------------------------
 # Presets are "Group: Name=time, Name=time; Group: ...". A time is anything
 # Custom… accepts (a bare number is minutes); the name becomes the label.
-PRESETS="Quick: ☕ Tea=4, 🥚 Soft eggs=7, 🍝 Pasta=10; Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"
+# Your five most recent timers are listed above these; "" shows recents only.
+PRESETS="Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"
 SOUND="/System/Library/Sounds/Glass.aiff"       # default alarm; Settings → Alarm sound overrides it
 SNOOZE_MIN=5                                    # length of the "Snooze" button
 RING_FOR=300                                    # seconds to keep ringing if ignored
@@ -24,8 +25,11 @@ HOTKEY="CMD+OPTION+T"                           # opens Custom… from any app; 
 CHECK_UPDATES=1                                 # 0 = never look for a newer version on GitHub
 # ---------------------------------------------------------------------------
 
-# v2's default list is carried over by the updater; give those users the named presets.
-[ "$PRESETS" = "1 5 10 15 20 25 30 45 60" ] && PRESETS="Quick: ☕ Tea=4, 🥚 Soft eggs=7, 🍝 Pasta=10; Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"
+# Old default lists are carried over by the updater; give those users the current default.
+case "$PRESETS" in
+  "1 5 10 15 20 25 30 45 60"|"Quick: ☕ Tea=4, 🥚 Soft eggs=7, 🍝 Pasta=10; Focus: 🍅 Pomodoro=25, 🧠 Deep work=50")
+    PRESETS="Focus: 🍅 Pomodoro=25, 🧠 Deep work=50" ;;
+esac
 
 STATE_DIR="$HOME/Library/Application Support/menubar-timer"
 STATE="$STATE_DIR/state"        # line 1: running|paused|ringing  line 2: end epoch or secs left  line 3: label  line 4: total secs
@@ -128,6 +132,7 @@ clean_label() { printf '%s' "$1" | tr -d '|"\n\r' | sed -e 's/^[[:space:]]*//' -
 start_timer() {  # seconds [label]
   stop_alarm
   write_state running $(( $(now) + $1 )) "$(clean_label "$2")" "$1"
+  record_recent "$1" "$(clean_label "$2")"
 }
 
 record_recent() {  # seconds label
@@ -282,7 +287,6 @@ ask_custom() {
   reply=$(printf '%s' "$ASK_SCRIPT" | osascript - 2>/dev/null) || exit 0
   if parse_time "$reply"; then
     start_timer "$SECS" "$REST"
-    record_recent "$SECS" "$(clean_label "$REST")"
   else
     osascript -e 'display alert "Couldn'"'"'t understand that time" message "Try something like 25m, 1h30m, 90s or 10:00."' >/dev/null 2>&1
   fi
@@ -290,7 +294,8 @@ ask_custom() {
 
 # Clicks in the menu run this script again with an argument.
 case "$1" in
-  start)   start_timer "$2" "$3"; exit 0 ;;
+  start)   case "$2" in ''|*[!0-9]*|0) exit 1 ;; esac; start_timer "$2" "$3"; exit 0 ;;
+  snooze)  stop_alarm; write_state running $(( $(now) + SNOOZE_MIN * 60 )) "$(clean_label "$2")" $(( SNOOZE_MIN * 60 )); exit 0 ;;   # not added to recents
   custom)  ask_custom; exit 0 ;;
   ring)    ring "$2"; exit 0 ;;
   stop)    stop_alarm; rm -f "$STATE"; exit 0 ;;
@@ -351,18 +356,18 @@ preset_rows() {
   done <<< "$spec;"
 }
 
-launcher() {  # the "start a timer" rows: presets, recents, Custom…
-  local p="$1" secs label
-  preset_rows "$p"
+launcher() {  # the "start a timer" rows: recents, presets, Custom…
+  local p="$1" secs label presets
   if [ -s "$RECENT" ]; then
-    echo "${p}---"
     echo "${p}RECENT | $HEADING"
     while IFS='|' read -r secs label; do
       case "$secs" in ''|*[!0-9]*) continue ;; esac
       echo "${p}${label:+$label · }$(dur_text "$secs") | $(action start "$secs" "$label") sfimage=arrow.counterclockwise"
     done < "$RECENT"
+    echo "${p}---"
   fi
-  echo "${p}---"
+  presets=$(preset_rows "$p")
+  [ -n "$presets" ] && { echo "$presets"; echo "${p}---"; }
   echo "${p}Custom… | $(action custom) sfimage=keyboard${HOTKEY:+ shortcut=$HOTKEY}"
 }
 
@@ -457,7 +462,7 @@ case "$MODE" in
     echo "$DONE_TEXT | size=20 color=$LATE"
     echo "---"
     echo "Stop alarm | $(action stop) sfimage=stop.fill"
-    echo "Snooze $SNOOZE_MIN min | $(action start $((SNOOZE_MIN * 60)) "$LABEL") sfimage=zzz"
+    echo "Snooze $SNOOZE_MIN min | $(action snooze "$LABEL") sfimage=zzz"
     [ "$TOTAL" -gt 0 ] && echo "Restart · $(dur_text "$TOTAL") | $(action start "$TOTAL" "$LABEL") sfimage=arrow.clockwise"
     ;;
   *)

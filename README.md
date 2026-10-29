@@ -8,7 +8,7 @@ This is a modern rewrite of [fferri/bitbar-countdown-timer](https://github.com/f
 
 - A live countdown in the menu bar (`◕ Tea 4:59`). The pie fills as time runs out, and the color goes from teal to amber in the last 20% and to red in the last 10 seconds.
 - The menu opens on a large countdown with a progress bar (`▰▰▰▰▰▰▱▱▱▱  of 15:00`) and the time it ends.
-- Named, grouped presets (**☕ Tea · 4 min**, **🍅 Pomodoro · 25 min**…), your five most recent custom timers, and **Custom…**, which you can also open from any app with **⌘⌥T**
+- Your five most recent timers at the top of the menu, so the ones you actually use are one click away, followed by named presets (**🍅 Pomodoro · 25 min**, **🧠 Deep work · 50 min**) and **Custom…**, which you can also open from any app with **⌘⌥T**
 - **Pause/Resume**, **Add 1 minute**, **Add 5 minutes** and **Cancel**. Hold **⌥** to change the Add items to **Subtract**.
 - A **Settings** menu where you choose the alarm sound (each one plays when you pick it) and what the menu bar shows: label and time, time only, or icon only
 - When it ends:
@@ -56,7 +56,7 @@ Also make sure notifications are allowed for SwiftBar under **System Settings �
 Edit the variables at the top of `timer.1s.sh`:
 
 ```sh
-PRESETS="Quick: ☕ Tea=4, 🥚 Soft eggs=7, 🍝 Pasta=10; Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"
+PRESETS="Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"  # shown below your recent timers; "" for none
 SOUND="/System/Library/Sounds/Glass.aiff"       # default alarm; Settings → Alarm sound overrides it
 SNOOZE_MIN=5                                    # length of the "Snooze" button
 RING_FOR=300                                    # seconds to keep ringing if ignored
@@ -67,9 +67,11 @@ CHECK_UPDATES=1                                 # 0 = never look for a newer ver
 
 ### Presets
 
-Separate groups with `;` and the presets in a group with `,`. A group can start with a heading such as `Quick:`, which is shown in small capitals. Each preset is `Name=time`, and the time can be written in any format **Custom…** accepts, so `Bread=1h30m` and `Eggs=7:30` both work. The name becomes the timer's label, and a preset with no name (just `15`) shows its length. A plain list of minutes like `"5 10 15"` still works.
+Separate groups with `;` and the presets in a group with `,`. A group can start with a heading such as `Focus:`, which is shown in small capitals. Each preset is `Name=time`, and the time can be written in any format **Custom…** accepts, so `Bread=1h30m` and `Eggs=7:30` both work. The name becomes the timer's label, and a preset with no name (just `15`) shows its length. A plain list of minutes like `"5 10 15"` still works.
 
-If you never changed `PRESETS` in v2, you get the new named presets automatically when you update.
+Presets are listed under **Recent**, which holds the last five timers you started (from a preset, a recent, **Custom…**, **Restart** or the command line; snoozes aren't counted). Set `PRESETS=""` to show only your recents. **Settings → Clear recent timers** empties the list.
+
+If you never changed `PRESETS`, you get the current default automatically when you update. In v3.1 that means the old Quick group (Tea, Soft eggs, Pasta) is removed, since your recents now fill that role.
 
 Choices you make in the **Settings** menu (alarm sound and menu bar display) are saved in `~/Library/Application Support/menubar-timer/prefs` and take priority over `SOUND` and `SHOW`.
 
