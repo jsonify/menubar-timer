@@ -1,6 +1,6 @@
 #!/bin/bash
 # <xbar.title>Menu Bar Timer</xbar.title>
-# <xbar.version>v2.1</xbar.version>
+# <xbar.version>v3.0</xbar.version>
 # <xbar.author>Jason Rueckert</xbar.author>
 # <xbar.author.github>jsonify</xbar.author.github>
 # <xbar.desc>Countdown timer that rings and grabs focus when it's done. Inspired by fferri/bitbar-countdown-timer.</xbar.desc>
@@ -12,16 +12,25 @@
 # Pure bash 3.2 + osascript, so it runs on a stock macOS with nothing to install.
 
 # ---- Settings -------------------------------------------------------------
-PRESETS="1 5 10 15 20 25 30 45 60"              # minutes, shown in the menu
-SOUND="/System/Library/Sounds/Glass.aiff"       # any .aiff in /System/Library/Sounds
+# Presets are "Group: Name=time, Name=time; Group: ...". A time is anything
+# Custom… accepts (a bare number is minutes); the name becomes the label.
+PRESETS="Quick: ☕ Tea=4, 🥚 Soft eggs=7, 🍝 Pasta=10; Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"
+SOUND="/System/Library/Sounds/Glass.aiff"       # default alarm; Settings → Alarm sound overrides it
 SNOOZE_MIN=5                                    # length of the "Snooze" button
 RING_FOR=300                                    # seconds to keep ringing if ignored
 FONT="Menlo"                                    # monospaced so the clock doesn't jiggle
+SHOW="label"                                    # menu bar: label (◕ Tea 4:59), time (◕ 4:59) or icon (◕)
+HOTKEY="CMD+OPTION+T"                           # opens Custom… from any app; "" to turn off
 CHECK_UPDATES=1                                 # 0 = never look for a newer version on GitHub
 # ---------------------------------------------------------------------------
 
+# v2's default list is carried over by the updater; give those users the named presets.
+[ "$PRESETS" = "1 5 10 15 20 25 30 45 60" ] && PRESETS="Quick: ☕ Tea=4, 🥚 Soft eggs=7, 🍝 Pasta=10; Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"
+
 STATE_DIR="$HOME/Library/Application Support/menubar-timer"
-STATE="$STATE_DIR/state"        # line 1: running|paused|ringing  line 2: end epoch or secs left  line 3: label
+STATE="$STATE_DIR/state"        # line 1: running|paused|ringing  line 2: end epoch or secs left  line 3: label  line 4: total secs
+PREFS="$STATE_DIR/prefs"        # KEY=value lines saved by the Settings menu (SOUND, SHOW)
+RECENT="$STATE_DIR/recent"      # secs|label lines, newest first, at most 5
 ALARM_PID="$STATE_DIR/alarm.pid"
 UPDATE_FILE="$STATE_DIR/update" # line 1: epoch of last check  line 2: newest version on GitHub
 UPDATE_URL="https://raw.githubusercontent.com/jsonify/menubar-timer/main/timer.1s.sh"
@@ -29,6 +38,24 @@ CHECK_EVERY=86400               # seconds between update checks
 SELF="$0"
 DONE_TEXT="Time's up!"
 mkdir -p "$STATE_DIR"
+
+# Choices made in the Settings menu win over the defaults above.
+load_prefs() {
+  local k v
+  [ -f "$PREFS" ] || return 0
+  while IFS='=' read -r k v; do
+    case "$k" in
+      SOUND) SOUND=$v ;;
+      SHOW)  SHOW=$v ;;
+    esac
+  done < "$PREFS"
+}
+
+set_pref() {  # key value
+  { [ -f "$PREFS" ] && grep -v "^$1=" "$PREFS"; printf '%s=%s\n' "$1" "$2"; } > "$PREFS.tmp" && mv -f "$PREFS.tmp" "$PREFS"
+}
+
+load_prefs
 
 now() { date +%s; }
 
@@ -42,12 +69,22 @@ clock() {  # epoch -> local wall-clock time (BSD date first, GNU fallback for te
   date -r "$1" '+%-I:%M %p' 2>/dev/null || date -d "@$1" '+%-I:%M %p'
 }
 
-write_state() { printf '%s\n%s\n%s\n' "$1" "$2" "$3" > "$STATE"; }
+dur_text() {  # seconds -> "4 min", "1 hr 30 min", "1 min 30 sec"
+  local t=$1 h m s out=""
+  h=$((t / 3600)); m=$((t % 3600 / 60)); s=$((t % 60))
+  [ "$h" -gt 0 ] && out="$h hr"
+  [ "$m" -gt 0 ] && out="${out:+$out }$m min"
+  [ "$s" -gt 0 ] && out="${out:+$out }$s sec"
+  printf '%s' "${out:-0 sec}"
+}
+
+write_state() { printf '%s\n%s\n%s\n%s\n' "$1" "$2" "$3" "$4" > "$STATE"; }
 
 read_state() {
-  MODE=""; VALUE=""; LABEL=""
+  MODE=""; VALUE=""; LABEL=""; TOTAL=""
   [ -f "$STATE" ] || return 1
-  { read -r MODE; read -r VALUE; read -r LABEL; } < "$STATE"
+  { read -r MODE; read -r VALUE; read -r LABEL; read -r TOTAL; } < "$STATE"
+  case "$TOTAL" in ''|*[!0-9]*) TOTAL=0 ;; esac   # state files from v2 have no total
   [ -n "$MODE" ]
 }
 
@@ -86,11 +123,33 @@ parse_time() {
   [ $matched -eq 1 ] && [ "$SECS" -gt 0 ]
 }
 
-clean_label() { printf '%s' "$1" | tr -d '|\n\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+clean_label() { printf '%s' "$1" | tr -d '|"\n\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
 
 start_timer() {  # seconds [label]
   stop_alarm
-  write_state running $(( $(now) + $1 )) "$(clean_label "$2")"
+  write_state running $(( $(now) + $1 )) "$(clean_label "$2")" "$1"
+}
+
+record_recent() {  # seconds label
+  local line="$1|$2"
+  { echo "$line"; [ -f "$RECENT" ] && grep -vxF -- "$line" "$RECENT"; } | head -n 5 > "$RECENT.tmp" && mv -f "$RECENT.tmp" "$RECENT"
+}
+
+add_time() {  # seconds (negative subtracts); never leaves less than 1 second
+  local left total
+  read_state || return 0
+  case "$MODE" in
+    running) left=$(( VALUE - $(now) + $1 )) ;;
+    paused)  left=$(( VALUE + $1 )) ;;
+    *)       return 0 ;;
+  esac
+  [ "$left" -lt 1 ] && left=1
+  total=$(( TOTAL + $1 )); [ "$total" -lt "$left" ] && total=$left
+  if [ "$MODE" = running ]; then
+    write_state running $(( $(now) + left )) "$LABEL" "$total"
+  else
+    write_state paused "$left" "$LABEL" "$total"
+  fi
 }
 
 stop_alarm() {
@@ -143,7 +202,7 @@ ring() {
   kill "$sp" $kids 2>/dev/null
   rm -f "$ALARM_PID"
   case "$answer" in
-    Snooze*) write_state running $(( $(now) + SNOOZE_MIN * 60 )) "$(read_state; echo "$LABEL")" ;;
+    Snooze*) read_state; write_state running $(( $(now) + SNOOZE_MIN * 60 )) "$LABEL" $(( SNOOZE_MIN * 60 )) ;;
     *)       rm -f "$STATE" ;;
   esac
 }
@@ -223,6 +282,7 @@ ask_custom() {
   reply=$(printf '%s' "$ASK_SCRIPT" | osascript - 2>/dev/null) || exit 0
   if parse_time "$reply"; then
     start_timer "$SECS" "$REST"
+    record_recent "$SECS" "$(clean_label "$REST")"
   else
     osascript -e 'display alert "Couldn'"'"'t understand that time" message "Try something like 25m, 1h30m, 90s or 10:00."' >/dev/null 2>&1
   fi
@@ -234,14 +294,12 @@ case "$1" in
   custom)  ask_custom; exit 0 ;;
   ring)    ring "$2"; exit 0 ;;
   stop)    stop_alarm; rm -f "$STATE"; exit 0 ;;
-  pause)   read_state && [ "$MODE" = running ] && write_state paused $(( VALUE - $(now) )) "$LABEL"; exit 0 ;;
-  resume)  read_state && [ "$MODE" = paused ] && write_state running $(( $(now) + VALUE )) "$LABEL"; exit 0 ;;
-  add)     if read_state; then
-             case "$MODE" in
-               running) write_state running $(( VALUE + $2 )) "$LABEL" ;;
-               paused)  write_state paused  $(( VALUE + $2 )) "$LABEL" ;;
-             esac
-           fi; exit 0 ;;
+  pause)   read_state && [ "$MODE" = running ] && write_state paused $(( VALUE - $(now) )) "$LABEL" "$TOTAL"; exit 0 ;;
+  resume)  read_state && [ "$MODE" = paused ] && write_state running $(( $(now) + VALUE )) "$LABEL" "$TOTAL"; exit 0 ;;
+  add)     add_time "$2"; exit 0 ;;
+  set-sound) if [ -f "$2" ]; then set_pref SOUND "$2"; nohup afplay "$2" </dev/null >/dev/null 2>&1 & fi; exit 0 ;;   # plays a preview
+  set-show)  case "$2" in label|time|icon) set_pref SHOW "$2" ;; esac; exit 0 ;;
+  clear-recent) rm -f "$RECENT"; exit 0 ;;
   check-update) check_update; exit $? ;;
   update)  install_update; exit $? ;;
   parse)   parse_time "$2" && echo "$SECS|$REST" || echo "invalid"; exit 0 ;;   # for testing
@@ -250,13 +308,78 @@ esac
 # ---- Menu bar rendering (runs every second) --------------------------------
 action() { printf 'bash="%s" param1=%s' "$SELF" "$1"; shift; local i=2; for p in "$@"; do printf ' param%d="%s"' $i "$p"; i=$((i+1)); done; printf ' terminal=false refresh=true'; }
 
-presets_menu() {
-  local prefix="$1" m
-  for m in $PRESETS; do
-    if [ "$m" -ge 60 ] && [ $((m % 60)) -eq 0 ]; then t="$((m / 60)) hr"; else t="$m min"; fi
-    echo "${prefix}$t | $(action start $((m * 60)))"
+# Colors are "light menu bar,dark menu bar".
+CALM="#0E8F78,#3CCFB0"; SOON="#B86E00,#F2A33A"; LATE="#D93025,#F0605D"
+HEADING="size=11 color=gray"
+
+pie() {  # elapsed total -> ○ ◔ ◑ ◕ ●
+  local i=0
+  [ "$2" -gt 0 ] && i=$(( ($1 * 8 / $2 + 1) / 2 ))
+  case $i in 0) printf '○' ;; 1) printf '◔' ;; 2) printf '◑' ;; 3) printf '◕' ;; *) printf '●' ;; esac
+}
+
+bar() {  # elapsed total -> ▰▰▰▱▱▱▱▱▱▱
+  local n=0 i out=""
+  [ "$2" -gt 0 ] && n=$(( $1 * 10 / $2 ))
+  for ((i = 0; i < 10; i++)); do if [ $i -lt $n ]; then out="$out▰"; else out="$out▱"; fi; done
+  printf '%s' "$out"
+}
+
+# Groups split on ";", an optional "Heading:" starts a group, items split on ",".
+# A plain "1 5 10" list (the v2 format) still works.
+preset_rows() {
+  local p="$1" spec=$PRESETS grp head item name first=1
+  [[ $spec == *[=,\;:]* ]] || spec=$(printf '%s' "$spec" | sed 's/[[:space:]][[:space:]]*/, /g')
+  while IFS= read -r -d ';' grp; do
+    head=""
+    if [[ $grp =~ ^[[:space:]]*([^:=,]+):(.*)$ ]] && [[ ${BASH_REMATCH[1]} == *[![:digit:][:space:]]* ]]; then
+      head=$(clean_label "${BASH_REMATCH[1]}"); grp=${BASH_REMATCH[2]}
+    fi
+    [ $first -eq 1 ] || echo "${p}---"
+    first=0
+    [ -n "$head" ] && echo "${p}$(printf '%s' "$head" | tr 'a-z' 'A-Z') | $HEADING"
+    while IFS= read -r -d ',' item; do
+      name=""
+      case "$item" in *=*) name=$(clean_label "${item%%=*}"); item=${item#*=} ;; esac
+      parse_time "$item" || continue
+      if [ -n "$name" ]; then
+        echo "${p}$name · $(dur_text "$SECS") | $(action start "$SECS" "$name")"
+      else
+        echo "${p}$(dur_text "$SECS") | $(action start "$SECS") sfimage=timer"
+      fi
+    done <<< "$grp,"
+  done <<< "$spec;"
+}
+
+launcher() {  # the "start a timer" rows: presets, recents, Custom…
+  local p="$1" secs label
+  preset_rows "$p"
+  if [ -s "$RECENT" ]; then
+    echo "${p}---"
+    echo "${p}RECENT | $HEADING"
+    while IFS='|' read -r secs label; do
+      case "$secs" in ''|*[!0-9]*) continue ;; esac
+      echo "${p}${label:+$label · }$(dur_text "$secs") | $(action start "$secs" "$label") sfimage=arrow.counterclockwise"
+    done < "$RECENT"
+  fi
+  echo "${p}---"
+  echo "${p}Custom… | $(action custom) sfimage=keyboard${HOTKEY:+ shortcut=$HOTKEY}"
+}
+
+settings_menu() {
+  local f name opt
+  echo "Settings | sfimage=gearshape"
+  echo "--Alarm sound | sfimage=speaker.wave.2"
+  for f in /System/Library/Sounds/*.aiff; do
+    [ -e "$f" ] || continue
+    name=${f##*/}; name=${name%.aiff}
+    echo "----$name | $(action set-sound "$f")$([ "$f" = "$SOUND" ] && printf ' checked=true')"
   done
-  echo "${prefix}Custom… | $(action custom)"
+  echo "--Menu bar shows | sfimage=menubar.rectangle"
+  for opt in "label:Label and time" "time:Time only" "icon:Icon only"; do
+    echo "----${opt#*:} | $(action set-show "${opt%%:*}")$([ "${opt%%:*}" = "$SHOW" ] && printf ' checked=true')"
+  done
+  [ -s "$RECENT" ] && echo "--Clear recent timers | $(action clear-recent) sfimage=trash"
 }
 
 if read_state; then
@@ -264,7 +387,7 @@ if read_state; then
     running)
       left=$(( VALUE - $(now) ))
       if [ "$left" -le 0 ]; then
-        write_state ringing 0 "$LABEL"
+        write_state ringing 0 "$LABEL" "$TOTAL"
         nohup "$SELF" ring "${LABEL:-$DONE_TEXT}" </dev/null >/dev/null 2>&1 &
         MODE=ringing
       fi ;;
@@ -280,43 +403,69 @@ if [ "$CHECK_UPDATES" = 1 ]; then
 fi
 
 case "$MODE" in
-  running)
-    color=""
-    [ "$left" -le 60 ] && color=" color=orange"
-    [ "$left" -le 10 ] && color=" color=red"
-    title=$(fmt "$left"); [ -n "$LABEL" ] && title="$LABEL $title"
-    echo "$title | sfimage=timer font=$FONT$color"
+  running|paused)
+    [ "$MODE" = paused ] && left=$VALUE
+    [ "$TOTAL" -lt "$left" ] && TOTAL=$left
+    elapsed=$(( TOTAL - left ))
+    if [ "$MODE" = paused ]; then
+      color=gray
+    else
+      color=$CALM
+      [ $(( left * 5 )) -le "$TOTAL" ] && color=$SOON
+      [ "$left" -le 10 ] && color=$LATE
+    fi
+    time=$(fmt "$left")
+    case "$SHOW" in
+      icon) title="" ;;
+      time) title=$time ;;
+      *)    title=$time; [ -n "$LABEL" ] && title="$LABEL $time" ;;
+    esac
+    if [ "$MODE" = paused ]; then
+      echo "$title | sfimage=pause.circle font=$FONT color=gray"
+    else
+      echo "$(pie "$elapsed" "$TOTAL")${title:+ $title} | font=$FONT color=$color"
+    fi
     echo "---"
-    [ -n "$LABEL" ] && echo "$LABEL"
-    echo "Ends at $(clock "$VALUE") | color=gray"
-    echo "---"
-    echo "Pause | $(action pause) sfimage=pause.fill"
-    echo "+1 min | $(action add 60) sfimage=plus"
-    echo "+5 min | $(action add 300) sfimage=plus"
+    [ -n "$LABEL" ] && echo "$LABEL | size=12 color=gray"
+    echo "$time | font=$FONT size=28 color=$color"
+    echo "$(bar "$elapsed" "$TOTAL")  of $(fmt "$TOTAL") | font=$FONT size=12 color=$color"
+    if [ "$MODE" = paused ]; then
+      echo "Paused | size=12 color=gray"
+      echo "---"
+      echo "Resume | $(action resume) sfimage=play.fill"
+    else
+      echo "Ends at $(clock "$VALUE") | size=12 color=gray"
+      echo "---"
+      echo "Pause | $(action pause) sfimage=pause.fill"
+    fi
+    # Holding ⌥ swaps each "Add" row for the "Subtract" row after it.
+    echo "Add 1 minute | $(action add 60) sfimage=plus"
+    echo "Subtract 1 minute | $(action add -60) sfimage=minus alternate=true"
+    echo "Add 5 minutes | $(action add 300) sfimage=plus"
+    echo "Subtract 5 minutes | $(action add -300) sfimage=minus alternate=true"
     echo "Cancel | $(action stop) sfimage=xmark"
     echo "---"
-    echo "Start a different timer"
-    presets_menu "--"
-    ;;
-  paused)
-    title=$(fmt "$VALUE"); [ -n "$LABEL" ] && title="$LABEL $title"
-    echo "$title | sfimage=pause.circle font=$FONT color=gray"
+    echo "New timer | sfimage=timer"
+    launcher "--"
     echo "---"
-    echo "Resume | $(action resume) sfimage=play.fill"
-    echo "+1 min | $(action add 60) sfimage=plus"
-    echo "+5 min | $(action add 300) sfimage=plus"
-    echo "Cancel | $(action stop) sfimage=xmark"
+    settings_menu
     ;;
   ringing)
-    echo "${LABEL:-$DONE_TEXT} | sfimage=alarm.fill color=red"
+    echo "${LABEL:-$DONE_TEXT} | sfimage=alarm.fill color=$LATE"
+    echo "---"
+    [ -n "$LABEL" ] && echo "$LABEL | size=12 color=gray"
+    echo "$DONE_TEXT | size=20 color=$LATE"
     echo "---"
     echo "Stop alarm | $(action stop) sfimage=stop.fill"
     echo "Snooze $SNOOZE_MIN min | $(action start $((SNOOZE_MIN * 60)) "$LABEL") sfimage=zzz"
+    [ "$TOTAL" -gt 0 ] && echo "Restart · $(dur_text "$TOTAL") | $(action start "$TOTAL" "$LABEL") sfimage=arrow.clockwise"
     ;;
   *)
     echo "| sfimage=timer"
     echo "---"
-    presets_menu ""
+    launcher ""
+    echo "---"
+    settings_menu
     ;;
 esac
 
