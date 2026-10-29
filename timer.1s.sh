@@ -1,9 +1,11 @@
 #!/bin/bash
 # <xbar.title>Menu Bar Timer</xbar.title>
-# <xbar.version>v2.0</xbar.version>
+# <xbar.version>v2.1</xbar.version>
 # <xbar.author>Jason Rueckert</xbar.author>
+# <xbar.author.github>jsonify</xbar.author.github>
 # <xbar.desc>Countdown timer that rings and grabs focus when it's done. Inspired by fferri/bitbar-countdown-timer.</xbar.desc>
 # <xbar.dependencies>bash,osascript</xbar.dependencies>
+# <xbar.abouturl>https://github.com/jsonify/menubar-timer</xbar.abouturl>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>
 #
@@ -15,11 +17,15 @@ SOUND="/System/Library/Sounds/Glass.aiff"       # any .aiff in /System/Library/S
 SNOOZE_MIN=5                                    # length of the "Snooze" button
 RING_FOR=300                                    # seconds to keep ringing if ignored
 FONT="Menlo"                                    # monospaced so the clock doesn't jiggle
+CHECK_UPDATES=1                                 # 0 = never look for a newer version on GitHub
 # ---------------------------------------------------------------------------
 
 STATE_DIR="$HOME/Library/Application Support/menubar-timer"
 STATE="$STATE_DIR/state"        # line 1: running|paused|ringing  line 2: end epoch or secs left  line 3: label
 ALARM_PID="$STATE_DIR/alarm.pid"
+UPDATE_FILE="$STATE_DIR/update" # line 1: epoch of last check  line 2: newest version on GitHub
+UPDATE_URL="https://raw.githubusercontent.com/jsonify/menubar-timer/main/timer.1s.sh"
+CHECK_EVERY=86400               # seconds between update checks
 SELF="$0"
 DONE_TEXT="Time's up!"
 mkdir -p "$STATE_DIR"
@@ -142,6 +148,76 @@ ring() {
   esac
 }
 
+# ---- Updates ----------------------------------------------------------------
+script_version() { sed -n 's/.*<xbar.version>v\{0,1\}\([0-9][0-9.]*\)<\/xbar.version>.*/\1/p' "$1" | head -n 1; }
+
+version_gt() {  # true if dotted version $1 is newer than $2
+  local IFS=. i p q
+  local -a a=($1) b=($2)
+  for ((i = 0; i < ${#a[@]} || i < ${#b[@]}; i++)); do
+    p=$((10#${a[i]:-0})); q=$((10#${b[i]:-0}))
+    [ "$p" -gt "$q" ] && return 0
+    [ "$p" -lt "$q" ] && return 1
+  done
+  return 1
+}
+
+read_update() { LAST_CHECK=0; LATEST=""; [ -f "$UPDATE_FILE" ] && { read -r LAST_CHECK; read -r LATEST; } < "$UPDATE_FILE"; }
+
+check_update() {
+  local dl="$STATE_DIR/.check.$$" found prev
+  read_update; prev=$LATEST
+  curl -fsSL --max-time 15 "$UPDATE_URL" -o "$dl" 2>/dev/null || { rm -f "$dl"; return 1; }
+  found=$(script_version "$dl"); rm -f "$dl"
+  [ -n "$found" ] || return 1
+  printf '%s\n%s\n' "$(now)" "$found" > "$UPDATE_FILE"
+  if version_gt "$found" "$(script_version "$SELF")" && [ "$found" != "$prev" ]; then
+    osascript -e "display notification \"Version $found is available. Open the timer menu to install it.\" with title \"⏰ Timer\"" >/dev/null 2>&1
+  fi
+}
+
+# Downloads the newest script and swaps it in place, keeping your Settings block.
+install_update() {
+  local target="$SELF" link dir dl tmp v
+  if [ -L "$target" ]; then   # follow a symlinked plugin to the real file
+    link=$(readlink "$target")
+    case "$link" in /*) target=$link ;; *) target="$(dirname "$target")/$link" ;; esac
+  fi
+  dir=$(dirname "$target")
+  dl="$STATE_DIR/.download.$$"
+  tmp="$dir/.timer-update.$$"   # hidden, so SwiftBar doesn't load it as a plugin
+  if ! curl -fsSL --max-time 30 "$UPDATE_URL" -o "$dl" 2>/dev/null; then
+    rm -f "$dl"
+    osascript -e 'display alert "Couldn'"'"'t download the update" message "Check your internet connection and try again."' >/dev/null 2>&1
+    return 1
+  fi
+  v=$(script_version "$dl")
+  if [ "$(head -n 1 "$dl")" != "#!/bin/bash" ] || [ -z "$v" ] || ! bash -n "$dl" 2>/dev/null; then
+    rm -f "$dl"
+    osascript -e 'display alert "The downloaded update looks broken" message "Your current version was left as it is."' >/dev/null 2>&1
+    return 1
+  fi
+  # Carry over every setting from the current file into the new one.
+  awk 'NR == FNR {
+         if (/^# ---- Settings/) s = 1
+         else if (s && /^# ----/) s = 0
+         else if (s && /^[A-Za-z_][A-Za-z_0-9]*=/) { k = $0; sub(/=.*/, "", k); old[k] = $0 }
+         next
+       }
+       /^# ---- Settings/ { t = 1; print; next }
+       t && /^# ----/ { t = 0 }
+       t && /^[A-Za-z_][A-Za-z_0-9]*=/ { k = $0; sub(/=.*/, "", k); if (k in old) { print old[k]; next } }
+       { print }' "$target" "$dl" > "$tmp" && chmod 755 "$tmp" && mv -f "$tmp" "$target"
+  local ok=$?
+  rm -f "$dl" "$tmp"
+  if [ $ok -eq 0 ]; then
+    osascript -e "display notification \"Updated to version $v.\" with title \"⏰ Timer\"" >/dev/null 2>&1
+  else
+    osascript -e 'display alert "Couldn'"'"'t install the update" message "The plugin file could not be replaced."' >/dev/null 2>&1
+  fi
+  return $ok
+}
+
 ask_custom() {
   local reply
   reply=$(printf '%s' "$ASK_SCRIPT" | osascript - 2>/dev/null) || exit 0
@@ -166,6 +242,8 @@ case "$1" in
                paused)  write_state paused  $(( VALUE + $2 )) "$LABEL" ;;
              esac
            fi; exit 0 ;;
+  check-update) check_update; exit $? ;;
+  update)  install_update; exit $? ;;
   parse)   parse_time "$2" && echo "$SECS|$REST" || echo "invalid"; exit 0 ;;   # for testing
 esac
 
@@ -191,6 +269,14 @@ if read_state; then
         MODE=ringing
       fi ;;
   esac
+fi
+
+if [ "$CHECK_UPDATES" = 1 ]; then
+  read_update
+  if [ $(( $(now) - ${LAST_CHECK:-0} )) -ge "$CHECK_EVERY" ]; then
+    printf '%s\n%s\n' "$(now)" "$LATEST" > "$UPDATE_FILE"   # stamp first so we only spawn one check
+    nohup "$SELF" check-update </dev/null >/dev/null 2>&1 &
+  fi
 fi
 
 case "$MODE" in
@@ -233,3 +319,8 @@ case "$MODE" in
     presets_menu ""
     ;;
 esac
+
+if [ "$CHECK_UPDATES" = 1 ] && [ "$MODE" != ringing ] && [ -n "$LATEST" ] && version_gt "$LATEST" "$(script_version "$SELF")"; then
+  echo "---"
+  echo "Update to v$LATEST | $(action update) sfimage=arrow.down.circle"
+fi
