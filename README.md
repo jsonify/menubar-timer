@@ -14,6 +14,7 @@ This is a modern rewrite of [fferri/bitbar-countdown-timer](https://github.com/f
   - an alert pops up in front of your other windows with **Snooze 5 min** and **Stop** buttons
   - a notification is sent and the menu bar icon turns red
 - The timer keeps running if SwiftBar restarts, because its state is stored on disk.
+- It checks GitHub for a newer version once a day and offers a one-click update.
 
 ## Install
 
@@ -56,9 +57,18 @@ PRESETS="1 5 10 15 20 25 30 45 60"              # minutes, shown in the menu
 SOUND="/System/Library/Sounds/Glass.aiff"       # any .aiff in /System/Library/Sounds
 SNOOZE_MIN=5                                    # length of the "Snooze" button
 RING_FOR=300                                    # seconds to keep ringing if ignored
+CHECK_UPDATES=1                                 # 0 = never look for a newer version on GitHub
 ```
 
 Other built-in sounds you can use for `SOUND`: `Ping`, `Hero`, `Sosumi`, `Submarine`, `Funk`, `Glass` and `Purr`. Run `ls /System/Library/Sounds` to see all of them.
+
+## Updates
+
+Once a day, the plugin downloads the copy of `timer.1s.sh` on this repo's `main` branch and compares its `<xbar.version>` with its own. If the one on GitHub is newer, you get a notification and the menu shows **Update to vX.Y**. Clicking it downloads the new script and swaps it in. The values you set in the Settings block are copied into the new version, so your changes are kept. If the download fails or the file looks broken, your current version is left as it is.
+
+To turn this off, set `CHECK_UPDATES=0`.
+
+**Releasing a new version:** bump `<xbar.version>` in `timer.1s.sh` and merge to `main`. Anyone running an older version is offered the update within a day.
 
 ## Command line
 
@@ -70,6 +80,8 @@ You can control the timer from a terminal or a Shortcut, as well as from the men
 ./timer.1s.sh resume
 ./timer.1s.sh add 60             # add a minute
 ./timer.1s.sh stop               # cancel the timer, or silence a ringing alarm
+./timer.1s.sh check-update       # look for a newer version now
+./timer.1s.sh update             # install the newest version from GitHub
 ```
 
 The timer's state is stored in `~/Library/Application Support/menubar-timer/`.
