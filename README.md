@@ -56,7 +56,7 @@ Also make sure notifications are allowed for SwiftBar under **System Settings �
 Edit the variables at the top of `timer.1s.sh`:
 
 ```sh
-PRESETS="Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"  # shown below your recent timers; "" for none
+PRESETS="Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"   # shown below your recent timers; "" for none
 SOUND="/System/Library/Sounds/Glass.aiff"       # default alarm; Settings → Alarm sound overrides it
 SNOOZE_MIN=5                                    # length of the "Snooze" button
 RING_FOR=300                                    # seconds to keep ringing if ignored
@@ -90,10 +90,11 @@ To turn this off, set `CHECK_UPDATES=0`.
 You can control the timer from a terminal or a Shortcut, as well as from the menu:
 
 ```sh
-./timer.1s.sh start 300 "Eggs"   # start a 5-minute timer labeled "Eggs"
+./timer.1s.sh start 300 "Eggs"   # start a 5-minute timer labeled "Eggs" (added to Recent)
 ./timer.1s.sh pause
 ./timer.1s.sh resume
 ./timer.1s.sh add 60             # add a minute (add -60 takes one away)
+./timer.1s.sh snooze "Eggs"      # start a snooze-length timer without adding it to Recent
 ./timer.1s.sh stop               # cancel the timer, or silence a ringing alarm
 ./timer.1s.sh check-update       # look for a newer version now
 ./timer.1s.sh update             # install the newest version from GitHub
