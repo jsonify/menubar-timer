@@ -334,7 +334,8 @@ function run(argv) {
     var s = sh(['status'], true).trim();
     if (!s || (s === last && !force)) return;
     last = s;
-    web.evaluateJavaScriptCompletionHandler('MT.render(' + s + ')', null);
+    // WebKit always calls the completion handler, and JXA turns null into a block that throws when called.
+    web.evaluateJavaScriptCompletionHandler('MT.render(' + s + ')', function () {});
   }
 
   // No "protocols" lists: JXA can only name protocols already loaded in the runtime, and
