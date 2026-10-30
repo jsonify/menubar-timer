@@ -9,6 +9,7 @@ This is a modern rewrite of [fferri/bitbar-countdown-timer](https://github.com/f
 - A live countdown in the menu bar (`◕ Tea 4:59`). The pie fills as time runs out, and the color goes from teal to amber in the last 20% and to red in the last 10 seconds.
 - The menu opens on a large countdown with a progress bar (`▰▰▰▰▰▰▱▱▱▱  of 15:00`) and the time it ends.
 - Your five most recent timers at the top of the menu, so the ones you actually use are one click away, followed by named presets (**🍅 Pomodoro · 25 min**, **🧠 Deep work · 50 min**) and **Custom…**, which you can also open from any app with **⌘⌥T**
+- **Custom…** opens a new-timer window in the same retro style: set the length with **Hours / Minutes / Seconds** knobs, type an optional label, or pick one of your recent timers or presets
 - **Pause/Resume**, **Add 1 minute**, **Add 5 minutes** and **Cancel**. Hold **⌥** to change the Add items to **Subtract**.
 - A **Settings** menu where you choose the alarm sound (each one plays when you pick it), the snooze length, and what the menu bar shows: label and time, time only, or icon only
 - Click the timer in the menu bar to drop down a **panel** with a retro hardware look (see [Panel](#panel)): a green seven-segment LCD, chunky keys, and knobs you drag or scroll to set a timer. Right-click it for the standard menu.
@@ -42,7 +43,7 @@ Also make sure notifications are allowed for SwiftBar under **System Settings �
 
 Click the timer in the menu bar and a panel styled like a piece of desk hardware drops down below it. Like a menu, it goes away when you click anywhere else, click the timer again, or click **Close** in the panel.
 
-The standard menu is still there: **right-click** the timer (or ⌥-click it). It also has **Open panel** and **Close panel**. If you'd rather a left-click open the menu, choose **Settings → Clicking the timer opens → This menu**, or set `CLICK="menu"`. Opening the panel with a click needs a recent version of SwiftBar. Older versions open the menu on every click, so use **Open panel** in the menu instead.
+The standard menu is still there: **right-click** the timer (or ⌥-click it). It also has **Open panel**. If you'd rather a left-click open the menu, choose **Settings → Clicking the timer opens → This menu**, or set `CLICK="menu"`. Opening the panel with a click needs a recent version of SwiftBar. Older versions open the menu on every click, so use **Open panel** in the menu instead.
 
 - **LCD**: the countdown in seven-segment digits, the timer's label, when it ends, a progress strip, and whether it's running, paused or ringing. The **Run / Pause / Ring** lights at the top match.
 - **Keys**:
@@ -55,13 +56,22 @@ The standard menu is still there: **right-click** the timer (or ⌥-click it). I
 - **Settings**: what the menu bar shows, and the alarm sound. Use the arrows to step through the sounds, and click the name to hear it.
 - **Keyboard**: Space is the orange key, Esc is Reset, `+` adds a minute, Return is Edit and ⌘W closes the panel.
 
-The panel, and the alarm window that opens when a timer ends, are a web page in a WebKit window run by `osascript`, and it's built into `timer.1s.sh`, so there's still nothing to install. It reads the timer from `timer.1s.sh status` twice a second and sends clicks back as the commands listed under [Command line](#command-line), so the panel, the menu and the terminal always agree.
+The panel, the alarm window and the new-timer window are all one web page shown in a WebKit window run by `osascript`. It's built into `timer.1s.sh`, so there's still nothing to install. The panel fits its window to its contents, so the window grows if your recent timers wrap onto a second row.
 
-If the panel or the alarm window doesn't open, the reason is written to `~/Library/Application Support/menubar-timer/window.log`.
+The first click starts the panel. After that, putting it away only hides it, so later clicks open it instantly. It reads nothing while hidden, and updating the plugin restarts it. While it's open, it reads the timer from `timer.1s.sh status` twice a second and sends clicks back as the commands listed under [Command line](#command-line), so the panel, the menu and the terminal always agree.
+
+If the panel, the alarm or the new-timer window doesn't open, the reason is written to `~/Library/Application Support/menubar-timer/window.log`.
 
 ## Custom times
 
-**Custom…** accepts any of these formats. Any text after the time becomes the timer's label.
+**Custom…** opens the new-timer window:
+
+- **Knobs**: drag or scroll **Hours**, **Minutes** and **Seconds**. The LCD shows the length as you go.
+- **Label**: type an optional label. The window opens ready for typing.
+- **Recent** and your **preset** groups are buttons. Click one to load its length and label onto the knobs, or double-click it to start it right away.
+- **Start** (or Return) starts the timer, and **Cancel** (or Esc) closes the window.
+
+If the window can't open, you get a plain dialog where you type the time instead. Presets and that dialog accept any of these formats, and any text after the time becomes the timer's label:
 
 | You type         | Timer             |
 |------------------|-------------------|
@@ -78,8 +88,8 @@ If the panel or the alarm window doesn't open, the reason is written to `~/Libra
 Edit the variables at the top of `timer.1s.sh`:
 
 ```sh
-# Presets are "Group: Name=time, Name=time; Group: ...". A time is anything
-# Custom… accepts (a bare number is minutes); the name becomes the label.
+# Presets are "Group: Name=time, Name=time; Group: ...". A time is like 25, 25m,
+# 1h30m, 90s or 10:00 (a bare number is minutes); the name becomes the label.
 # Your five most recent timers are listed above these; "" shows recents only.
 PRESETS="Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"
 SOUND="/System/Library/Sounds/Glass.aiff"       # default alarm; Settings → Alarm sound overrides it
@@ -94,7 +104,7 @@ CHECK_UPDATES=1                                 # 0 = never look for a newer ver
 
 ### Presets
 
-Separate groups with `;` and the presets in a group with `,`. A group can start with a heading such as `Focus:`, which is shown in small capitals. Each preset is `Name=time`, and the time can be written in any format **Custom…** accepts, so `Bread=1h30m` and `Eggs=7:30` both work. The name becomes the timer's label, and a preset with no name (just `15`) shows its length. A plain list of minutes like `"5 10 15"` still works.
+Separate groups with `;` and the presets in a group with `,`. A group can start with a heading such as `Focus:`, which is shown in small capitals. Each preset is `Name=time`, and the time can be written in any of the formats in [Custom times](#custom-times), so `Bread=1h30m` and `Eggs=7:30` both work. The name becomes the timer's label, and a preset with no name (just `15`) shows its length. A plain list of minutes like `"5 10 15"` still works.
 
 Presets are listed under **Recent**, which holds the last five timers you started (from a preset, a recent, **Custom…**, **Restart** or the command line; snoozes aren't counted). Set `PRESETS=""` to show only your recents. **Settings → Clear recent timers** empties the list.
 
