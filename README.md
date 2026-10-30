@@ -43,7 +43,7 @@ Also make sure notifications are allowed for SwiftBar under **System Settings �
 
 Click the timer in the menu bar and a panel styled like a piece of desk hardware drops down below it. Like a menu, it goes away when you click anywhere else, click the timer again, or click **Close** in the panel.
 
-The standard menu is still there: **right-click** the timer (or ⌥-click it). It also has **Open panel** and **Close panel**. If you'd rather a left-click open the menu, choose **Settings → Clicking the timer opens → This menu**, or set `CLICK="menu"`. Opening the panel with a click needs a recent version of SwiftBar. Older versions open the menu on every click, so use **Open panel** in the menu instead.
+The standard menu is still there: **right-click** the timer (or ⌥-click it). It also has **Open panel**. If you'd rather a left-click open the menu, choose **Settings → Clicking the timer opens → This menu**, or set `CLICK="menu"`. Opening the panel with a click needs a recent version of SwiftBar. Older versions open the menu on every click, so use **Open panel** in the menu instead.
 
 - **LCD**: the countdown in seven-segment digits, the timer's label, when it ends, a progress strip, and whether it's running, paused or ringing. The **Run / Pause / Ring** lights at the top match.
 - **Keys**:
@@ -56,7 +56,9 @@ The standard menu is still there: **right-click** the timer (or ⌥-click it). I
 - **Settings**: what the menu bar shows, and the alarm sound. Use the arrows to step through the sounds, and click the name to hear it.
 - **Keyboard**: Space is the orange key, Esc is Reset, `+` adds a minute, Return is Edit and ⌘W closes the panel.
 
-The panel, the alarm window and the new-timer window are all one web page shown in a WebKit window run by `osascript`. It's built into `timer.1s.sh`, so there's still nothing to install. The panel fits its window to its contents, so the window grows if your recent timers wrap onto a second row. It reads the timer from `timer.1s.sh status` twice a second and sends clicks back as the commands listed under [Command line](#command-line), so the panel, the menu and the terminal always agree.
+The panel, the alarm window and the new-timer window are all one web page shown in a WebKit window run by `osascript`. It's built into `timer.1s.sh`, so there's still nothing to install. The panel fits its window to its contents, so the window grows if your recent timers wrap onto a second row.
+
+The first click starts the panel. After that, putting it away only hides it, so later clicks open it instantly. It reads nothing while hidden, and updating the plugin restarts it. While it's open, it reads the timer from `timer.1s.sh status` twice a second and sends clicks back as the commands listed under [Command line](#command-line), so the panel, the menu and the terminal always agree.
 
 If the panel, the alarm or the new-timer window doesn't open, the reason is written to `~/Library/Application Support/menubar-timer/window.log`.
 

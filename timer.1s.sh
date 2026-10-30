@@ -38,7 +38,7 @@ PREFS="$STATE_DIR/prefs"        # KEY=value lines saved by the Settings menu and
 RECENT="$STATE_DIR/recent"      # secs|label lines, newest first, at most 5
 ALARM_PID="$STATE_DIR/alarm.pid"
 PANEL_PID="$STATE_DIR/panel.pid"
-PANEL_CLOSED="$STATE_DIR/panel.closed"   # epoch the panel last closed itself (clicked away)
+PANEL_REQ="$STATE_DIR/panel.toggle"   # created to ask the running panel to show or hide
 WINDOW_LOG="$STATE_DIR/window.log"   # errors from the last panel, alarm or new-timer window
 UPDATE_FILE="$STATE_DIR/update" # line 1: epoch of last check  line 2: newest version on GitHub
 UPDATE_URL="https://raw.githubusercontent.com/jsonify/menubar-timer/main/timer.1s.sh"
@@ -208,7 +208,7 @@ ring() {
   osascript -e 'display notification "Timer finished" with title "⏰ Timer" sound name "Glass"' >/dev/null 2>&1
   ( while :; do afplay "$SOUND"; sleep 0.3; done ) &
   sp=$!
-  read_state
+  read_state; load_windows
   answer=$(osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" alarm \
     "{\"label\":$(json_str "$LABEL"),\"total\":${TOTAL:-0},\"snooze\":$SNOOZE_MIN,\"ends\":\"$(clock "$(now)")\",\"ringFor\":$RING_FOR}" "$RING_FOR" 2>"$WINDOW_LOG")
   # If the styled window couldn't open, fall back to a plain dialog (unless the alarm was stopped meanwhile).
@@ -287,6 +287,7 @@ install_update() {
   local ok=$?
   rm -f "$dl" "$tmp"
   if [ $ok -eq 0 ]; then
+    panel_open && kill "$(cat "$PANEL_PID")" 2>/dev/null   # the next click starts the new version
     osascript -e "display notification \"Updated to version $v.\" with title \"⏰ Timer\"" >/dev/null 2>&1
   else
     osascript -e 'display alert "Couldn'"'"'t install the update" message "The plugin file could not be replaced."' >/dev/null 2>&1
@@ -302,17 +303,21 @@ install_update() {
 # menubar-timer://app/status (this script's "status") twice a second to redraw.
 # The same page, in "alarm" mode, is the window that rings, and in "new" mode
 # it's the new-timer window that Custom… opens.
+load_windows() {  # sets PANEL_JS and PANEL_HTML; only read when a window opens, not on every refresh
 read -r -d '' PANEL_JS <<'JXA'
 ObjC.import('Cocoa');
 ObjC.import('WebKit');
 
-// argv: script html [mode init-json ring-for]. mode is panel (the default), alarm or new.
-// The alarm prints the button clicked (Stop, Snooze, Restart, or gaveup after ring-for
-// seconds) and exits; the new-timer window prints "start|secs|label" or "cancel".
+// argv: script html [mode init-json ring-for request-file]. mode is panel (the default),
+// alarm or new. The alarm prints the button clicked (Stop, Snooze, Restart, or gaveup after
+// ring-for seconds) and exits; the new-timer window prints "start|secs|label" or "cancel".
+// The panel keeps running when it's put away, so it reopens instantly: it shows or hides
+// whenever request-file appears.
 function run(argv) {
   var script = argv[0], html = argv[1], mode = argv[2] || 'panel', width = 300;
   var alarm = mode === 'alarm', dialog = mode !== 'panel';
-  var init = argv[3] || '{}', ringFor = Number(argv[4]) || 0, waited = 0, answered = false;
+  var init = argv[3] || '{}', ringFor = Number(argv[4]) || 0, request = argv[5] || '';
+  var started = Date.now(), answered = false, shown = false, hiddenAt = 0;
   var app = $.NSApplication.sharedApplication;
   app.setActivationPolicy(1);   // accessory: a window but no Dock icon
 
@@ -338,6 +343,37 @@ function run(argv) {
 
   var web, win;
 
+  function place() {   // drop down from the menu bar, under the pointer (which is on the timer you just clicked)
+    var m = $.NSEvent.mouseLocation, screens = $.NSScreen.screens, vf = $.NSScreen.mainScreen.visibleFrame;
+    for (var i = 0; i < screens.count; i++) {
+      var sf = screens.objectAtIndex(i).frame;
+      if (m.x >= sf.origin.x && m.x < sf.origin.x + sf.size.width && m.y >= sf.origin.y && m.y <= sf.origin.y + sf.size.height) vf = screens.objectAtIndex(i).visibleFrame;
+    }
+    var w = win.frame.size.width;
+    var x = Math.max(vf.origin.x + 6, Math.min(m.x - w / 2, vf.origin.x + vf.size.width - w - 6));
+    win.setFrameTopLeftPoint($.NSMakePoint(x, vf.origin.y + vf.size.height - 4));
+  }
+  function show() {
+    if (dialog) win.center; else place();
+    app.unhideWithoutActivation;
+    app.activateIgnoringOtherApps(true);
+    win.makeKeyAndOrderFront(null);
+    win.orderFrontRegardless;
+    shown = true;
+  }
+  function hide() {   // put the panel away but keep it loaded
+    if (!win.isVisible) return;
+    hiddenAt = Date.now();
+    win.orderOut(null);
+    app.hide(null);   // hand focus back to the app you were in
+  }
+  function toggle() {
+    if (win.isVisible) hide();
+    // Clicking the menu bar timer while the panel is open hides it on the way (it lost focus),
+    // just before this request arrives; don't reopen it.
+    else if (Date.now() - hiddenAt > 600) show();
+  }
+
   // No "protocols" lists: JXA can only name protocols already loaded in the runtime, and
   // WKScriptMessageHandler isn't. WebKit and NSWindow only check that the methods exist.
   ObjC.registerSubclass({
@@ -347,13 +383,14 @@ function run(argv) {
         types: ['void', ['id', 'id']],
         implementation: function (ucc, msg) {
           var a = ObjC.deepUnwrap(msg.body) || [], cmd = a[0];
-          if (cmd === 'close') { win.close; return; }
+          if (cmd === 'close') { if (dialog) win.close; else hide(); return; }
           if (cmd === 'answer') { answer(String(a[1])); return; }
           if (cmd === 'size') {   // grow or shrink to fit the page, keeping the top edge in place
             var f = win.frame, h = Number(a[1]);
             var dh = win.frameRectForContentRect($.NSMakeRect(0, 0, width, h)).size.height - f.size.height;
             if (Math.abs(dh) >= 1) win.setFrameDisplay($.NSMakeRect(f.origin.x, f.origin.y - dh, f.size.width, f.size.height + dh), true);
-            if (dialog) win.center;
+            if (!shown) show();   // first showing waits for the page, so it doesn't open at the wrong size
+            else if (dialog) win.center;
             return;
           }
           sh(a, cmd !== 'custom');   // Custom… waits on a dialog, so don't block the window
@@ -371,7 +408,8 @@ function run(argv) {
       'webView:startURLSchemeTask:': {
         types: ['void', ['id', 'id']],
         implementation: function (wv, task) {
-          var body = $(sh(['status'], true).trim() || '{}').dataUsingEncoding(4);
+          // A hidden panel still polls; answer it without running the script.
+          var body = $((dialog || win.isVisible ? sh(['status'], true).trim() : '') || '{}').dataUsingEncoding(4);
           task.didReceiveResponse($.NSURLResponse.alloc.initWithURLMIMETypeExpectedContentLengthTextEncodingName(
             task.request.URL, 'application/json', body.length, 'utf-8'));
           task.didReceiveData(body);
@@ -385,8 +423,10 @@ function run(argv) {
   ObjC.registerSubclass({
     name: 'MTTicker',
     methods: { 'tick:': { types: ['void', ['id']], implementation: function () {
-      waited += 0.5;
-      if (waited >= ringFor) answer('gaveup');
+      if (!shown && Date.now() - started > 1500) show();   // the page never reported its size
+      if (alarm && ringFor && Date.now() - started >= ringFor * 1000) answer('gaveup');
+      var fm = $.NSFileManager.defaultManager;
+      if (request && fm.fileExistsAtPath(request)) { fm.removeItemAtPathError(request, null); toggle(); }
     } } }
   });
 
@@ -395,8 +435,7 @@ function run(argv) {
     methods: {
       'windowWillClose:': { types: ['void', ['id']], implementation: function () { if (dialog) answer(alarm ? 'Stop' : 'cancel'); else app.terminate(null); } },
       // The panel drops down like a menu, so clicking anywhere else puts it away.
-      // The stamp stops the click on the menu bar timer from reopening it straight away.
-      'windowDidResignKey:': { types: ['void', ['id']], implementation: function () { if (!dialog) { sh(['panel-closed'], true); win.close; } } }
+      'windowDidResignKey:': { types: ['void', ['id']], implementation: function () { if (!dialog) hide(); } }
     }
   });
 
@@ -429,25 +468,10 @@ function run(argv) {
   win.contentView = web;
   web.loadHTMLStringBaseURL(html, $.NSURL.URLWithString('menubar-timer://app/'));
 
-  if (dialog) win.center;
-  else {   // drop down from the menu bar, under the pointer (which is on the timer you just clicked)
-    var m = $.NSEvent.mouseLocation, screens = $.NSScreen.screens, vf = $.NSScreen.mainScreen.visibleFrame;
-    for (var i = 0; i < screens.count; i++) {
-      var sf = screens.objectAtIndex(i).frame;
-      if (m.x >= sf.origin.x && m.x < sf.origin.x + sf.size.width && m.y >= sf.origin.y && m.y <= sf.origin.y + sf.size.height) vf = screens.objectAtIndex(i).visibleFrame;
-    }
-    var w = win.frame.size.width;
-    var x = Math.max(vf.origin.x + 6, Math.min(m.x - w / 2, vf.origin.x + vf.size.width - w - 6));
-    win.setFrameTopLeftPoint($.NSMakePoint(x, vf.origin.y + vf.size.height - 4));
-  }
-  win.makeKeyAndOrderFront(null);
-  win.orderFrontRegardless;
-  app.activateIgnoringOtherApps(true);
-
-  if (alarm && ringFor) {   // gives up after ring-for seconds
-    var ticker = $.MTTicker.alloc.init;
-    $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.5, ticker, 'tick:', null, true);
-  }
+  // Shown once the page reports its size (see "size"). The ticker also watches for
+  // show/hide requests and the alarm's time limit.
+  var ticker = $.MTTicker.alloc.init;
+  $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.1, ticker, 'tick:', null, true);
   app.run;
 }
 JXA
@@ -986,7 +1010,7 @@ body:not(.alarm):not(.new) .device { padding-bottom: 34px; }
   };
   if (ALARM) startAlarm(window.MT_INIT || {});
   else if (NEW) startNew(window.MT_INIT || {});
-  else { window.MT.render({}); poll(); setInterval(poll, 500); }
+  else { window.MT.render({}); poll(); setInterval(poll, 500); window.addEventListener("focus", poll); }   // focus: shown again
   // Fit the window to the page, again whenever it changes height (recent timers wrapping onto a second row).
   function fit() { send("size", $("device").offsetHeight); }
   if (window.ResizeObserver) new ResizeObserver(fit).observe($("device")); else fit();
@@ -994,6 +1018,8 @@ body:not(.alarm):not(.new) .device { padding-bottom: 34px; }
 </script>
 </body></html>
 HTML
+return 0
+}
 
 panel_open() {
   local pid
@@ -1003,15 +1029,11 @@ panel_open() {
 
 abs_self() { case "$SELF" in /*) printf '%s' "$SELF" ;; *) printf '%s' "$PWD/$SELF" ;; esac; }
 
-toggle_panel() {  # opens the panel, or closes it if it's already open
-  local closed=0
-  if panel_open; then kill "$(cat "$PANEL_PID")" 2>/dev/null; rm -f "$PANEL_PID"; return; fi
-  # Clicking the menu bar timer while the panel is open closes it on the way (it lost focus); don't reopen it.
-  [ -f "$PANEL_CLOSED" ] && read -r closed < "$PANEL_CLOSED"
-  case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
-  rm -f "$PANEL_CLOSED"
-  [ $(( $(now) - closed )) -le 1 ] && return
-  nohup osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" </dev/null >/dev/null 2>"$WINDOW_LOG" &
+toggle_panel() {  # shows or hides the panel; its process stays running in between, so it opens instantly
+  if panel_open; then : > "$PANEL_REQ"; return; fi
+  rm -f "$PANEL_REQ"
+  load_windows
+  nohup osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" panel '{}' 0 "$PANEL_REQ" </dev/null >/dev/null 2>"$WINDOW_LOG" &
   echo $! > "$PANEL_PID"
 }
 
@@ -1084,6 +1106,7 @@ new_json() {  # recents and preset groups for the new-timer window
 
 ask_custom() {  # the retro new-timer window, or the plain dialog if it can't open
   local reply secs
+  load_windows
   reply=$(osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" new "$(new_json)" 2>"$WINDOW_LOG")
   case "$reply" in
     cancel) return ;;
@@ -1115,7 +1138,6 @@ case "$1" in
   set-show)  case "$2" in label|time|icon) set_pref SHOW "$2" ;; esac; exit 0 ;;
   set-snooze) case "$2" in ''|*[!0-9]*|0) exit 1 ;; esac; set_pref SNOOZE_MIN "$2"; exit 0 ;;
   panel)   toggle_panel; exit 0 ;;
-  panel-closed) now > "$PANEL_CLOSED"; rm -f "$PANEL_PID"; exit 0 ;;   # sent by the panel when it closes itself
   set-click) case "$2" in panel|menu) set_pref CLICK "$2" ;; esac; exit 0 ;;
   status)  status_json; exit 0 ;;
   clear-recent) rm -f "$RECENT"; exit 0 ;;
@@ -1182,10 +1204,7 @@ launcher() {  # the "start a timer" rows: recents, presets, Custom…
   echo "${p}Custom… | $(action custom) sfimage=keyboard${HOTKEY:+ shortcut=$HOTKEY}"
 }
 
-panel_item() {
-  if panel_open; then echo "Close panel | $(action panel) sfimage=xmark.rectangle"
-  else echo "Open panel | $(action panel) sfimage=slider.horizontal.3"; fi
-}
+panel_item() { echo "Open panel | $(action panel) sfimage=slider.horizontal.3"; }
 
 settings_menu() {
   local f name opt
