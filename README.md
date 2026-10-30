@@ -1,6 +1,6 @@
 # menubar-timer
 
-A countdown timer for the macOS menu bar, built as a [SwiftBar](https://github.com/swiftbar/SwiftBar) plugin. When the timer ends, it **loops an alarm sound** and **opens a dialog in front of every other window**, which stays up until you click Stop or Snooze.
+A countdown timer for the macOS menu bar, built as a [SwiftBar](https://github.com/swiftbar/SwiftBar) plugin. When the timer ends, it **loops an alarm sound** and **opens an alarm window in front of every other window**, which stays up until you click Stop or Snooze.
 
 This is a modern rewrite of [fferri/bitbar-countdown-timer](https://github.com/fferri/bitbar-countdown-timer). That plugin depended on Python 2, which macOS no longer includes. This version is a single bash script that only uses tools already on every Mac (`bash`, `osascript`, `afplay`), so there's nothing to install.
 
@@ -14,7 +14,7 @@ This is a modern rewrite of [fferri/bitbar-countdown-timer](https://github.com/f
 - An optional **panel** window with a retro hardware look (see [Panel](#panel)): a green seven-segment LCD, chunky keys, and knobs you drag or scroll to set a timer
 - When it ends:
   - the sound loops
-  - an alert pops up in front of your other windows with **Snooze 5 min** and **Stop** buttons
+  - an alarm window in the same retro style as the [panel](#panel) opens in front of your other windows, on every Space and over full-screen apps. Its LCD flashes **00:00** with the backlight pulsing and counts how long it has been ringing. It has **Again** (run the same timer again), **Snooze** and **Stop** keys, and shows when it will stop ringing by itself. On the keyboard, Return, Space or Esc stops it, S snoozes and R restarts.
   - a notification is sent and the menu bar icon turns red
   - the menu has a **Restart** item that runs the same timer again
 - The timer keeps running if SwiftBar restarts, because its state is stored on disk.
@@ -32,9 +32,9 @@ This is a modern rewrite of [fferri/bitbar-countdown-timer](https://github.com/f
 
 The `1s` in the filename tells SwiftBar to refresh the plugin every second.
 
-### First alarm: allow SwiftBar to control System Events
+### If the alarm window can't open
 
-The alert comes to the front by asking **System Events** to show it. The first time this happens, macOS asks: *"SwiftBar wants to control System Events"*. Click **OK**. If you click Don't Allow, the alarm still rings, but the dialog may open behind your current window. To change the setting later, go to **System Settings → Privacy & Security → Automation → SwiftBar**.
+If the styled alarm window can't open, the plugin falls back to a plain dialog with **Snooze** and **Stop** buttons. That dialog comes to the front by asking **System Events** to show it. The first time this happens, macOS asks: *"SwiftBar wants to control System Events"*. Click **OK**. If you click Don't Allow, the alarm still rings, but the dialog may open behind your current window. To change the setting later, go to **System Settings → Privacy & Security → Automation → SwiftBar**.
 
 Also make sure notifications are allowed for SwiftBar under **System Settings → Notifications**.
 
@@ -53,7 +53,7 @@ Choose **Open panel** from the menu to get a small window styled like a piece of
 - **Settings**: what the menu bar shows, and the alarm sound. Use the arrows to step through the sounds, and click the name to hear it.
 - **Keyboard**: Space is the orange key, Esc is Reset, `+` adds a minute, Return is Edit and ⌘W closes the panel.
 
-The panel is a web page in a WebKit window run by `osascript`, and it's built into `timer.1s.sh`, so there's still nothing to install. It reads the timer from `timer.1s.sh status` twice a second and sends clicks back as the commands listed under [Command line](#command-line), so the panel, the menu and the terminal always agree.
+The panel, and the alarm window that opens when a timer ends, are a web page in a WebKit window run by `osascript`, and it's built into `timer.1s.sh`, so there's still nothing to install. It reads the timer from `timer.1s.sh status` twice a second and sends clicks back as the commands listed under [Command line](#command-line), so the panel, the menu and the terminal always agree.
 
 ## Custom times
 

@@ -197,19 +197,25 @@ end tell
 return text returned of r
 APPLESCRIPT
 
-# Runs detached: loops the sound and puts a dialog in front of everything.
+# Runs detached: loops the sound and puts the alarm window in front of everything.
 ring() {
   local label="${1:-$DONE_TEXT}" sp kids answer
   echo $$ > "$ALARM_PID"
   osascript -e 'display notification "Timer finished" with title "⏰ Timer" sound name "Glass"' >/dev/null 2>&1
   ( while :; do afplay "$SOUND"; sleep 0.3; done ) &
   sp=$!
-  answer=$(printf '%s' "$ALARM_SCRIPT" | osascript - "$label" "Snooze $SNOOZE_MIN min" "$RING_FOR" 2>/dev/null)
+  read_state
+  answer=$(osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" alarm \
+    "{\"label\":$(json_str "$LABEL"),\"total\":${TOTAL:-0},\"snooze\":$SNOOZE_MIN,\"ends\":\"$(clock "$(now)")\",\"ringFor\":$RING_FOR}" "$RING_FOR" 2>/dev/null)
+  # If the styled window couldn't open, fall back to a plain dialog (unless the alarm was stopped meanwhile).
+  [ -z "$answer" ] && [ -f "$ALARM_PID" ] &&
+    answer=$(printf '%s' "$ALARM_SCRIPT" | osascript - "$label" "Snooze $SNOOZE_MIN min" "$RING_FOR" 2>/dev/null)
   kids=$(pgrep -P "$sp" 2>/dev/null)
   kill "$sp" $kids 2>/dev/null
   rm -f "$ALARM_PID"
   case "$answer" in
     Snooze*) read_state; write_state running $(( $(now) + SNOOZE_MIN * 60 )) "$LABEL" $(( SNOOZE_MIN * 60 )) ;;
+    Restart) read_state; if [ "$TOTAL" -gt 0 ]; then start_timer "$TOTAL" "$LABEL"; else rm -f "$STATE"; fi ;;
     *)       rm -f "$STATE" ;;
   esac
 }
@@ -284,18 +290,21 @@ install_update() {
   return $ok
 }
 
-# ---- Panel ------------------------------------------------------------------
+# ---- Panel and alarm window -------------------------------------------------
 # A small window with an LCD, keys and knobs. It's an HTML page in a WebKit view
 # hosted by osascript (JavaScript for Automation), so it needs nothing installed.
 # The page talks to this script through the "timer" message handler: each
 # message is a command line for the case below, and "status" is polled twice a
-# second to redraw it.
+# second to redraw it. The same page, in "alarm" mode, is the window that rings.
 read -r -d '' PANEL_JS <<'JXA'
 ObjC.import('Cocoa');
 ObjC.import('WebKit');
 
+// argv: script html [alarm init-json ring-for]. As the alarm, it prints the button
+// clicked (Stop, Snooze, Restart, or gaveup after ring-for seconds) and exits.
 function run(argv) {
-  var script = argv[0], html = argv[1], width = 300;
+  var script = argv[0], html = argv[1], alarm = argv[2] === 'alarm', width = 300;
+  var init = argv[3] || '{}', ringFor = Number(argv[4]) || 0, waited = 0, answered = false;
   var app = $.NSApplication.sharedApplication;
   app.setActivationPolicy(1);   // accessory: a window but no Dock icon
 
@@ -310,6 +319,13 @@ function run(argv) {
     var data = out.fileHandleForReading.readDataToEndOfFile;
     t.waitUntilExit;
     return $.NSString.alloc.initWithDataEncoding(data, 4).js || '';
+  }
+
+  function answer(a) {
+    if (answered) return;
+    answered = true;
+    $.NSFileHandle.fileHandleWithStandardOutput.writeData($(a + '\n').dataUsingEncoding(4));
+    app.terminate(null);
   }
 
   var web, win, last = '';
@@ -329,6 +345,7 @@ function run(argv) {
         implementation: function (ucc, msg) {
           var a = ObjC.deepUnwrap(msg.body) || [], cmd = a[0];
           if (cmd === 'close') { win.close; return; }
+          if (cmd === 'answer') { answer(String(a[1])); return; }
           if (cmd === 'status') { push(true); return; }
           if (cmd === 'size') {   // grow or shrink to fit the page, keeping the top edge in place
             var f = win.frame, h = Number(a[1]);
@@ -345,13 +362,17 @@ function run(argv) {
 
   ObjC.registerSubclass({
     name: 'MTTicker',
-    methods: { 'tick:': { types: ['void', ['id']], implementation: function () { push(false); } } }
+    methods: { 'tick:': { types: ['void', ['id']], implementation: function () {
+      if (!alarm) return push(false);
+      waited += 0.5;
+      if (ringFor && waited >= ringFor) answer('gaveup');
+    } } }
   });
 
   ObjC.registerSubclass({
     name: 'MTWindowDelegate',
     protocols: ['NSWindowDelegate'],
-    methods: { 'windowWillClose:': { types: ['void', ['id']], implementation: function () { app.terminate(null); } } }
+    methods: { 'windowWillClose:': { types: ['void', ['id']], implementation: function () { if (alarm) answer('Stop'); else app.terminate(null); } } }
   });
 
   // titled + closable + miniaturizable + full-size content: the page draws under a clear title bar
@@ -361,6 +382,11 @@ function run(argv) {
   win.title = 'Menu Timer';
   win.backgroundColor = $.NSColor.colorWithSRGBRedGreenBlueAlpha(0.922, 0.910, 0.882, 1);
   win.standardWindowButton(2).hidden = true;   // no zoom button
+  if (alarm) {
+    win.standardWindowButton(1).hidden = true;
+    win.level = 25;                   // status-window level: above other apps' windows
+    win.collectionBehavior = 1 | 256; // on every Space, and over full-screen apps
+  }
   win.releasedWhenClosed = false;
   var delegate = $.MTWindowDelegate.alloc.init;
   win.delegate = delegate;
@@ -368,6 +394,8 @@ function run(argv) {
   var conf = $.WKWebViewConfiguration.alloc.init;
   var bridge = $.MTBridge.alloc.init;
   conf.userContentController.addScriptMessageHandlerName(bridge, 'timer');
+  conf.userContentController.addUserScript($.WKUserScript.alloc.initWithSourceInjectionTimeForMainFrameOnly(
+    'window.MT_MODE = ' + JSON.stringify(alarm ? 'alarm' : 'panel') + '; window.MT_INIT = ' + init + ';', 0, true));
   web = $.WKWebView.alloc.initWithFrameConfiguration(win.contentView.bounds, conf);
   web.autoresizingMask = 2 | 16;   // width + height sizable
   web.setValueForKey(false, 'drawsBackground');
@@ -375,8 +403,9 @@ function run(argv) {
   web.loadHTMLStringBaseURL(html, $.NSURL.URLWithString('https://menubar-timer.local/'));
 
   win.center;
-  win.setFrameAutosaveName('MenubarTimerPanel');   // reopen where you left it
+  if (!alarm) win.setFrameAutosaveName('MenubarTimerPanel');   // reopen where you left it
   win.makeKeyAndOrderFront(null);
+  win.orderFrontRegardless;
   app.activateIgnoringOtherApps(true);
 
   var ticker = $.MTTicker.alloc.init;
@@ -461,6 +490,10 @@ button { font: inherit; letter-spacing: inherit; text-transform: inherit; color:
 @keyframes blink { 50% { opacity: .15; } }
 .ringing .digits { animation: flash .5s steps(2) infinite; }
 @keyframes flash { 50% { opacity: .2; } }
+.lcd.ringing { animation: backlight 1.2s ease-in-out infinite alternate; }   /* the backlight pulses while it rings */
+@keyframes backlight {
+  to { background: linear-gradient(170deg, #eaf3c4 0%, #d9e6a2 60%, #cddb93 100%); box-shadow: inset 0 2px 5px rgba(0,0,0,.18), inset 0 0 0 1px rgba(0,0,0,.25), inset 0 0 18px rgba(255,250,190,.7); }
+}
 
 /* transport keys */
 .keys {
@@ -564,6 +597,16 @@ button { font: inherit; letter-spacing: inherit; text-transform: inherit; color:
 .grille { display: grid; grid-template-columns: repeat(7, 4px); gap: 3px; }
 .grille i { width: 4px; height: 4px; border-radius: 50%; background: radial-gradient(circle at 50% 35%, #8f8a80, #3d3b37); box-shadow: 0 .5px 0 rgba(255,255,255,.8); }
 .foot-r { display: flex; align-items: center; gap: 10px; }
+
+/* alarm window: the same page, showing only the LCD and the alarm keys */
+body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
+.keys.three { grid-template-columns: 1fr 1fr 1.7fr; }
+.alarm .legend .ring.on i { animation: blink .6s steps(2) infinite; }
+.alarm .serial { text-align: left; }
+.alarm .serial b { color: var(--ink); font: 600 10px/1.4 "SF Mono", Menlo, monospace; letter-spacing: 0; }
+.grille.buzz i { animation: buzz .09s linear infinite alternate; }
+.grille.buzz i:nth-child(2n) { animation-delay: -.045s; }
+@keyframes buzz { to { transform: translate(.4px, -.3px); } }
 </style></head>
 <body>
 <div class="device" id="device">
@@ -580,6 +623,7 @@ button { font: inherit; letter-spacing: inherit; text-transform: inherit; color:
     <div class="lcd-row"><div class="prog" id="prog"></div><span class="state"><i></i><b id="lcdState">Idle</b></span></div>
   </div></div>
 
+  <div class="panel-only">
   <div class="keys">
     <div class="key-wrap"><button class="key" id="kReset" title="Cancel the timer"><svg viewBox="0 0 16 16"><path d="M8 2.5a5.5 5.5 0 1 1-5.2 3.7l1.4.5A4 4 0 1 0 8 4v2L4.5 3.2 8 .5z"/></svg></button><label id="lReset">Reset</label></div>
     <div class="key-wrap"><button class="key orange" id="kPlay"><svg viewBox="0 0 16 16" id="iPlay"></svg></button><label id="lPlay">Start</label></div>
@@ -609,7 +653,21 @@ button { font: inherit; letter-spacing: inherit; text-transform: inherit; color:
     <button class="quit" id="close"><i></i>Close</button>
     <div class="foot-r">
       <div class="serial" id="serial">Menu bar<br>countdown</div>
-      <div class="grille" id="grille"></div>
+      <div class="grille"></div>
+    </div>
+  </div>
+  </div>
+
+  <div class="alarm-only">
+    <div class="rule"><b>Time's up</b> — <span id="aSub"></span></div>
+    <div class="keys three">
+      <div class="key-wrap"><button class="key" id="aRestart" title="Run the same timer again (R)"><svg viewBox="0 0 16 16"><path d="M8 2.5a5.5 5.5 0 1 0 5.2 3.7l-1.4.5A4 4 0 1 1 8 4v2l3.5-2.8L8 .5z"/></svg></button><label id="aRestartL">Restart</label></div>
+      <div class="key-wrap"><button class="key" id="aSnooze" title="Snooze (S)"><svg viewBox="0 0 16 16"><path d="M2 3h6v1.5L4.4 9H8v1.5H2V9l3.6-4.5H2zM9 8h5v1.2l-3 3.3h3V14H9v-1.2l3-3.3H9z"/></svg></button><label id="aSnoozeL">Snooze</label></div>
+      <div class="key-wrap"><button class="key orange" id="aStop" title="Stop (Return)"><svg viewBox="0 0 16 16"><path d="M3 3h10v10H3z"/></svg></button><label>Stop</label></div>
+    </div>
+    <div class="foot">
+      <div class="serial">Auto-stop in<br><b id="aAuto"></b></div>
+      <div class="grille buzz"></div>
     </div>
   </div>
 </div>
@@ -618,6 +676,8 @@ button { font: inherit; letter-spacing: inherit; text-transform: inherit; color:
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var S = { mode: "idle", left: 0, total: 0, label: "", ends: "", snooze: 5, show: "label", sound: "Glass", sounds: [], recent: [] };
+  var ALARM = window.MT_MODE === "alarm";
+  if (ALARM) document.body.classList.add("alarm");
   var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.timer;
   function send() { var a = [].slice.call(arguments).map(String); if (bridge) bridge.postMessage(a); else console.log("send", a.join(" ")); }
 
@@ -653,7 +713,7 @@ button { font: inherit; letter-spacing: inherit; text-transform: inherit; color:
   var progCells = $("prog").children;
 
   // ---- grille ----
-  $("grille").innerHTML = new Array(22).join("<i></i>");
+  [].forEach.call(document.querySelectorAll(".grille"), function (g) { g.innerHTML = new Array(22).join("<i></i>"); });
 
   // ---- knobs ----
   var store = {}; try { store = JSON.parse(localStorage.getItem("knobs") || "{}"); } catch (e) {}
@@ -719,6 +779,12 @@ button { font: inherit; letter-spacing: inherit; text-transform: inherit; color:
   $("kEdit").onclick = function () { send("custom"); };
   $("close").onclick = function () { send("close"); };
   document.addEventListener("keydown", function (e) {
+    if (ALARM) {
+      if (e.key === " " || e.key === "Enter" || e.key === "Escape") { e.preventDefault(); press("aStop"); }
+      else if (e.key === "s" || e.key === "z") press("aSnooze");
+      else if (e.key === "r") press("aRestart");
+      return;
+    }
     if (e.key === " ") { e.preventDefault(); press("kPlay"); }
     else if (e.key === "Escape") press("kReset");
     else if (e.key === "+" || e.key === "=") press("kAdd");
@@ -778,15 +844,34 @@ button { font: inherit; letter-spacing: inherit; text-transform: inherit; color:
     var z = KNOBS[3]; if (!z.el.querySelector(".well").matches(":active") && z.v !== S.snooze) { z.v = S.snooze; drawKnob(z); }
   }
 
+  // ---- alarm window ----
+  // The host passes MT_INIT = {label, total, snooze, ends, ringFor} and waits for one "answer".
+  function startAlarm(a) {
+    var t0 = Date.now();
+    MT.render({ mode: "ringing", label: a.label || "", total: a.total || 0, snooze: a.snooze || 5 });
+    $("aSub").textContent = "Ended " + a.ends + (a.total ? " · " + short(a.total) + " timer" : "");
+    $("aSnoozeL").textContent = "Snooze " + (a.snooze || 5) + "m";
+    $("aRestartL").textContent = a.total ? "Again " + short(a.total).replace(/ .*/, "") : "Restart";
+    $("aRestart").disabled = !a.total;
+    $("aStop").onclick = function () { send("answer", "Stop"); };
+    $("aSnooze").onclick = function () { send("answer", "Snooze"); };
+    $("aRestart").onclick = function () { if (a.total) send("answer", "Restart"); };
+    function tick() {
+      var over = Math.floor((Date.now() - t0) / 1000);
+      $("lcdRight").textContent = "+" + clock(over).replace(/^0/, "") + " over";
+      $("aAuto").textContent = clock(Math.max(0, (a.ringFor || 300) - over));
+    }
+    tick(); setInterval(tick, 1000);
+  }
+
   window.MT = {
     render: function (s) {
       for (var k in s) S[k] = s[k];
       renderLcd(); renderKeys(); renderChips(); renderSettings();
     }
   };
-  window.MT.render({});
+  if (ALARM) startAlarm(window.MT_INIT || {}); else { window.MT.render({}); send("status"); }
   send("size", document.getElementById("device").offsetHeight);
-  send("status");
 })();
 </script>
 </body></html>
@@ -798,11 +883,11 @@ panel_open() {
     ps -p "$pid" -o comm= 2>/dev/null | grep -q osascript
 }
 
+abs_self() { case "$SELF" in /*) printf '%s' "$SELF" ;; *) printf '%s' "$PWD/$SELF" ;; esac; }
+
 toggle_panel() {  # opens the panel, or closes it if it's already open
-  local self=$SELF
   if panel_open; then kill "$(cat "$PANEL_PID")" 2>/dev/null; rm -f "$PANEL_PID"; return; fi
-  case "$self" in /*) ;; *) self="$PWD/$self" ;; esac
-  nohup osascript -l JavaScript -e "$PANEL_JS" "$self" "$PANEL_HTML" </dev/null >/dev/null 2>&1 &
+  nohup osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" </dev/null >/dev/null 2>&1 &
   echo $! > "$PANEL_PID"
 }
 
