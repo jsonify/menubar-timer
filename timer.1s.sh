@@ -1,6 +1,6 @@
 #!/bin/bash
 # <xbar.title>Menu Bar Timer</xbar.title>
-# <xbar.version>v3.3</xbar.version>
+# <xbar.version>v3.4</xbar.version>
 # <xbar.author>Jason Rueckert</xbar.author>
 # <xbar.author.github>jsonify</xbar.author.github>
 # <xbar.desc>Countdown timer that rings and grabs focus when it's done. Inspired by fferri/bitbar-countdown-timer.</xbar.desc>
@@ -12,8 +12,8 @@
 # Pure bash 3.2 + osascript, so it runs on a stock macOS with nothing to install.
 
 # ---- Settings -------------------------------------------------------------
-# Presets are "Group: Name=time, Name=time; Group: ...". A time is anything
-# Custom… accepts (a bare number is minutes); the name becomes the label.
+# Presets are "Group: Name=time, Name=time; Group: ...". A time is like 25, 25m,
+# 1h30m, 90s or 10:00 (a bare number is minutes); the name becomes the label.
 # Your five most recent timers are listed above these; "" shows recents only.
 PRESETS="Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"
 SOUND="/System/Library/Sounds/Glass.aiff"       # default alarm; Settings → Alarm sound overrides it
@@ -39,7 +39,7 @@ RECENT="$STATE_DIR/recent"      # secs|label lines, newest first, at most 5
 ALARM_PID="$STATE_DIR/alarm.pid"
 PANEL_PID="$STATE_DIR/panel.pid"
 PANEL_CLOSED="$STATE_DIR/panel.closed"   # epoch the panel last closed itself (clicked away)
-WINDOW_LOG="$STATE_DIR/window.log"   # errors from the last panel or alarm window
+WINDOW_LOG="$STATE_DIR/window.log"   # errors from the last panel, alarm or new-timer window
 UPDATE_FILE="$STATE_DIR/update" # line 1: epoch of last check  line 2: newest version on GitHub
 UPDATE_URL="https://raw.githubusercontent.com/jsonify/menubar-timer/main/timer.1s.sh"
 CHECK_EVERY=86400               # seconds between update checks
@@ -294,20 +294,24 @@ install_update() {
   return $ok
 }
 
-# ---- Panel and alarm window -------------------------------------------------
+# ---- Panel, alarm and new-timer windows -------------------------------------
 # A small window with an LCD, keys and knobs. It's an HTML page in a WebKit view
 # hosted by osascript (JavaScript for Automation), so it needs nothing installed.
 # The page talks to this script through the "timer" message handler: each
 # message is a command line for the case below, and the page fetches
-# menubar-timer://app/status (this script's "status") twice a second to redraw. The same page, in "alarm" mode, is the window that rings.
+# menubar-timer://app/status (this script's "status") twice a second to redraw.
+# The same page, in "alarm" mode, is the window that rings, and in "new" mode
+# it's the new-timer window that Custom… opens.
 read -r -d '' PANEL_JS <<'JXA'
 ObjC.import('Cocoa');
 ObjC.import('WebKit');
 
-// argv: script html [alarm init-json ring-for]. As the alarm, it prints the button
-// clicked (Stop, Snooze, Restart, or gaveup after ring-for seconds) and exits.
+// argv: script html [mode init-json ring-for]. mode is panel (the default), alarm or new.
+// The alarm prints the button clicked (Stop, Snooze, Restart, or gaveup after ring-for
+// seconds) and exits; the new-timer window prints "start|secs|label" or "cancel".
 function run(argv) {
-  var script = argv[0], html = argv[1], alarm = argv[2] === 'alarm', width = 300;
+  var script = argv[0], html = argv[1], mode = argv[2] || 'panel', width = 300;
+  var alarm = mode === 'alarm', dialog = mode !== 'panel';
   var init = argv[3] || '{}', ringFor = Number(argv[4]) || 0, waited = 0, answered = false;
   var app = $.NSApplication.sharedApplication;
   app.setActivationPolicy(1);   // accessory: a window but no Dock icon
@@ -349,6 +353,7 @@ function run(argv) {
             var f = win.frame, h = Number(a[1]);
             var dh = win.frameRectForContentRect($.NSMakeRect(0, 0, width, h)).size.height - f.size.height;
             if (Math.abs(dh) >= 1) win.setFrameDisplay($.NSMakeRect(f.origin.x, f.origin.y - dh, f.size.width, f.size.height + dh), true);
+            if (dialog) win.center;
             return;
           }
           sh(a, cmd !== 'custom');   // Custom… waits on a dialog, so don't block the window
@@ -388,10 +393,10 @@ function run(argv) {
   ObjC.registerSubclass({
     name: 'MTWindowDelegate',
     methods: {
-      'windowWillClose:': { types: ['void', ['id']], implementation: function () { if (alarm) answer('Stop'); else app.terminate(null); } },
+      'windowWillClose:': { types: ['void', ['id']], implementation: function () { if (dialog) answer(alarm ? 'Stop' : 'cancel'); else app.terminate(null); } },
       // The panel drops down like a menu, so clicking anywhere else puts it away.
       // The stamp stops the click on the menu bar timer from reopening it straight away.
-      'windowDidResignKey:': { types: ['void', ['id']], implementation: function () { if (!alarm) { sh(['panel-closed'], true); win.close; } } }
+      'windowDidResignKey:': { types: ['void', ['id']], implementation: function () { if (!dialog) { sh(['panel-closed'], true); win.close; } } }
     }
   });
 
@@ -417,14 +422,14 @@ function run(argv) {
   var scheme = $.MTScheme.alloc.init;
   conf.setURLSchemeHandlerForURLScheme(scheme, 'menubar-timer');
   conf.userContentController.addUserScript($.WKUserScript.alloc.initWithSourceInjectionTimeForMainFrameOnly(
-    'window.MT_MODE = ' + JSON.stringify(alarm ? 'alarm' : 'panel') + '; window.MT_INIT = ' + init + ';', 0, true));
+    'window.MT_MODE = ' + JSON.stringify(mode) + '; window.MT_INIT = ' + init + ';', 0, true));
   web = $.WKWebView.alloc.initWithFrameConfiguration(win.contentView.bounds, conf);
   web.autoresizingMask = 2 | 16;   // width + height sizable
   web.setValueForKey($.NSNumber.numberWithBool(false), 'drawsBackground');
   win.contentView = web;
   web.loadHTMLStringBaseURL(html, $.NSURL.URLWithString('menubar-timer://app/'));
 
-  if (alarm) win.center;
+  if (dialog) win.center;
   else {   // drop down from the menu bar, under the pointer (which is on the timer you just clicked)
     var m = $.NSEvent.mouseLocation, screens = $.NSScreen.screens, vf = $.NSScreen.mainScreen.visibleFrame;
     for (var i = 0; i < screens.count; i++) {
@@ -631,8 +636,21 @@ button { font: inherit; letter-spacing: inherit; text-transform: inherit; color:
 .grille i { width: 4px; height: 4px; border-radius: 50%; background: radial-gradient(circle at 50% 35%, #8f8a80, #3d3b37); box-shadow: 0 .5px 0 rgba(255,255,255,.8); }
 .foot-r { display: flex; align-items: center; gap: 10px; }
 
-/* alarm window: the same page, showing only the LCD and the alarm keys */
-body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
+/* alarm and new-timer windows: the same page, showing the LCD and their own section */
+body.alarm .panel-only, body.new .panel-only, body:not(.alarm) .alarm-only, body:not(.new) .new-only { display: none; }
+body:not(.alarm):not(.new) .device { padding-bottom: 34px; }
+.knobs.three { grid-template-columns: repeat(3, 1fr); padding: 0 12px; }
+.keys.two { grid-template-columns: 1fr 2fr; }
+.field { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.field span { color: var(--ink); font-weight: 800; }
+.field input {
+  flex: 1; height: 22px; border: 0; outline: 0; border-radius: 3px; padding: 0 7px;
+  font: 700 10px/22px "SF Mono", Menlo, monospace; letter-spacing: .06em; text-transform: uppercase; color: var(--lcd-ink);
+  background: linear-gradient(#cfd5ba, #bfc6a9); box-shadow: inset 0 1px 2px rgba(0,0,0,.3), inset 0 0 0 .5px rgba(0,0,0,.25);
+  -webkit-user-select: text; user-select: text;
+}
+.field input::placeholder { color: rgba(30,35,24,.4); }
+.field input:focus { box-shadow: inset 0 1px 2px rgba(0,0,0,.3), inset 0 0 0 .5px rgba(0,0,0,.25), 0 0 0 2px rgba(255,92,28,.35); }
 .keys.three { grid-template-columns: 1fr 1fr 1.7fr; }
 .alarm .legend .ring.on i { animation: blink .6s steps(2) infinite; }
 .alarm .serial { text-align: left; }
@@ -703,20 +721,31 @@ body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
       <div class="grille buzz"></div>
     </div>
   </div>
+
+  <div class="new-only">
+    <div class="rule"><b>New timer</b> — drag or scroll a knob</div>
+    <div class="knobs three" id="newKnobs"></div>
+    <div class="field"><span>Label</span><input id="nLabel" maxlength="40" placeholder="Optional" spellcheck="false" autocomplete="off"></div>
+    <div id="nPresets"></div>
+    <div class="keys two">
+      <div class="key-wrap"><button class="key" id="nCancel" title="Cancel (Esc)"><svg viewBox="0 0 16 16"><path d="M3.4 2 8 6.6 12.6 2 14 3.4 9.4 8l4.6 4.6-1.4 1.4L8 9.4 3.4 14 2 12.6 6.6 8 2 3.4z"/></svg></button><label>Cancel</label></div>
+      <div class="key-wrap"><button class="key orange" id="nStart" title="Start (Return)"><svg viewBox="0 0 16 16"><path d="M4 2.2v11.6L13.5 8z"/></svg></button><label>Start</label></div>
+    </div>
+  </div>
 </div>
 
 <script>
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var S = { mode: "idle", left: 0, total: 0, label: "", ends: "", snooze: 5, show: "label", sound: "Glass", sounds: [], recent: [] };
-  var ALARM = window.MT_MODE === "alarm";
-  if (ALARM) document.body.classList.add("alarm");
+  var ALARM = window.MT_MODE === "alarm", NEW = window.MT_MODE === "new", DIALOG = ALARM || NEW;
+  if (DIALOG) document.body.classList.add(window.MT_MODE);
   var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.timer;
   function send() {
     var a = [].slice.call(arguments).map(String);
     if (!bridge) return console.log("send", a.join(" "));
     bridge.postMessage(a);
-    if (!ALARM) setTimeout(poll, 150);
+    if (!DIALOG) setTimeout(poll, 150);
   }
   function poll() {   // the window answers this URL with "timer.1s.sh status"
     if (bridge) fetch("menubar-timer://app/status").then(function (r) { return r.json(); }).then(function (s) { MT.render(s); }).catch(function () {});
@@ -764,6 +793,7 @@ body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
     { k: "s", name: "Seconds", unit: "sec", min: 0, max: 55, step: 5, v: store.s != null ? store.s : 0 },
     { k: "z", name: "Snooze", unit: "min", min: 1, max: 30, v: 5, accent: true }
   ];
+  if (NEW) KNOBS.pop();   // the new-timer window only sets the length
   var NT = 11, A0 = -135, A1 = 135;
   KNOBS.forEach(function (K) {
     var u = document.createElement("div"); u.className = "knob-unit" + (K.accent ? " accent" : "");
@@ -774,7 +804,7 @@ body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
       ticks += '<line class="tick' + (major ? " major" : "") + '" x1="' + (30 + r1 * Math.sin(a)).toFixed(2) + '" y1="' + (30 - r1 * Math.cos(a)).toFixed(2) + '" x2="' + (30 + r2 * Math.sin(a)).toFixed(2) + '" y2="' + (30 - r2 * Math.cos(a)).toFixed(2) + '"/>';
     }
     u.innerHTML = '<div class="well"><svg viewBox="0 0 60 60">' + ticks + '</svg><div class="knob"><div class="cap"></div></div></div><div class="val"></div><label>' + K.name + '</label><small>' + K.unit + '</small>';
-    $("knobs").appendChild(u);
+    $(NEW ? "newKnobs" : "knobs").appendChild(u);
     K.el = u; K.knob = u.querySelector(".knob"); K.val = u.querySelector(".val"); K.ticks = u.querySelectorAll(".tick");
     var well = u.querySelector(".well"), y0 = 0, v0 = 0, acc = 0;
     well.addEventListener("pointerdown", function (e) { well.setPointerCapture(e.pointerId); y0 = e.clientY; v0 = K.v; });
@@ -820,6 +850,11 @@ body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
   $("kEdit").onclick = function () { send("custom"); };
   $("close").onclick = function () { send("close"); };
   document.addEventListener("keydown", function (e) {
+    if (NEW) {   // other keys type into the label
+      if (e.key === "Enter") { e.preventDefault(); press("nStart"); }
+      else if (e.key === "Escape") press("nCancel");
+      return;
+    }
     if (ALARM) {
       if (e.key === " " || e.key === "Enter" || e.key === "Escape") { e.preventDefault(); press("aStop"); }
       else if (e.key === "s" || e.key === "z") press("aSnooze");
@@ -850,9 +885,9 @@ body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
     var m = S.mode, left = m === "idle" ? knobSecs() : S.left, total = m === "idle" ? 0 : Math.max(S.total, S.left);
     $("lcd").className = "lcd " + m;
     showDigits(m === "ringing" ? "00:00" : clock(left));
-    $("lcdLabel").textContent = S.label || (m === "idle" ? "Ready" : m === "ringing" ? "Time's up" : "Timer");
+    $("lcdLabel").textContent = S.label || (NEW ? "New timer" : m === "idle" ? "Ready" : m === "ringing" ? "Time's up" : "Timer");
     $("lcdRight").textContent = m === "running" ? "Ends " + S.ends : m === "paused" ? "of " + clock(total) : m === "ringing" ? "Snooze " + S.snooze + " min" : "Set " + short(left);
-    $("lcdState").textContent = { idle: "Idle", running: "Running", paused: "Paused", ringing: "Ringing" }[m];
+    $("lcdState").textContent = NEW ? "Set" : { idle: "Idle", running: "Running", paused: "Paused", ringing: "Ringing" }[m];
     var lit = m === "ringing" ? PROG : total ? Math.round((total - left) / total * PROG) : 0;
     for (var i = 0; i < PROG; i++) progCells[i].className = i < lit ? "on" : "";
     ["run", "pause", "ring"].forEach(function (c) { document.querySelector(".legend ." + c).classList.toggle("on", { run: "running", pause: "paused", ring: "ringing" }[c] === m); });
@@ -882,7 +917,7 @@ body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
   function renderSettings() {
     [].forEach.call($("show").children, function (b) { b.classList.toggle("on", b.dataset.v === S.show); });
     $("sound").textContent = S.sound;
-    var z = KNOBS[3]; if (!z.el.querySelector(".well").matches(":active") && z.v !== S.snooze) { z.v = S.snooze; drawKnob(z); }
+    var z = KNOBS[3]; if (z && !z.el.querySelector(".well").matches(":active") && z.v !== S.snooze) { z.v = S.snooze; drawKnob(z); }
   }
 
   // ---- alarm window ----
@@ -905,14 +940,56 @@ body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
     tick(); setInterval(tick, 1000);
   }
 
+  // ---- new-timer window ----
+  // The host passes MT_INIT = {groups: [{name, items: [[secs, label], ...]}, ...]} (recents, then
+  // the PRESETS groups) and waits for one "answer": "start|secs|label" or "cancel".
+  function startNew(a) {
+    var box = $("nPresets");
+    (a.groups || []).forEach(function (g) {
+      if (!g.items || !g.items.length) return;
+      var rule = document.createElement("div"), chips = document.createElement("div");
+      rule.className = "rule"; rule.innerHTML = "<b></b>"; rule.firstChild.textContent = g.name || "Presets";
+      chips.className = "chips";
+      g.items.forEach(function (it) {
+        var b = document.createElement("button"); b.className = "chip"; b.title = "Click to set, double-click to start";
+        b.innerHTML = (it[1] ? "<span></span>" : "") + "<em>" + short(it[0]) + "</em>";
+        if (it[1]) b.firstChild.textContent = it[1];
+        b.onclick = function () { pick(it); };
+        b.ondblclick = function () { pick(it); go(); };
+        chips.appendChild(b);
+      });
+      box.appendChild(rule); box.appendChild(chips);
+    });
+    function pick(it) {
+      var t = it[0];
+      setKnob(KNOBS[0], Math.floor(t / 3600)); setKnob(KNOBS[1], Math.floor(t % 3600 / 60)); setKnob(KNOBS[2], t % 60);
+      $("nLabel").value = it[1] || ""; S.label = it[1] || ""; renderLcd();
+    }
+    function go() {
+      var secs = knobSecs();
+      if (!secs) { $("lcd").animate([{ opacity: .4 }, { opacity: 1 }], 300); return; }
+      KNOBS.forEach(commit);
+      send("answer", "start|" + secs + "|" + $("nLabel").value.trim());
+    }
+    $("nLabel").oninput = function () { S.label = this.value.trim(); renderLcd(); };
+    $("nStart").onclick = go;
+    $("nCancel").onclick = function () { send("answer", "cancel"); };
+    MT.render({ mode: "idle" });
+    setTimeout(function () { $("nLabel").focus(); }, 50);
+  }
+
   window.MT = {
     render: function (s) {
       for (var k in s) S[k] = s[k];
       renderLcd(); renderKeys(); renderChips(); renderSettings();
     }
   };
-  if (ALARM) startAlarm(window.MT_INIT || {}); else { window.MT.render({}); poll(); setInterval(poll, 500); }
-  send("size", document.getElementById("device").offsetHeight);
+  if (ALARM) startAlarm(window.MT_INIT || {});
+  else if (NEW) startNew(window.MT_INIT || {});
+  else { window.MT.render({}); poll(); setInterval(poll, 500); }
+  // Fit the window to the page, again whenever it changes height (recent timers wrapping onto a second row).
+  function fit() { send("size", $("device").offsetHeight); }
+  if (window.ResizeObserver) new ResizeObserver(fit).observe($("device")); else fit();
 })();
 </script>
 </body></html>
@@ -965,8 +1042,57 @@ status_json() {  # one line of JSON describing the timer and settings, for the p
     "$mode" "$left" "$total" "$(json_str "$label")" "$ends" "$SNOOZE_MIN" "$SHOW" "$(json_str "${n%.aiff}")" "$sounds" "$recent"
 }
 
-ask_custom() {
-  local reply
+preset_list() {  # PRESETS as group-number|heading|secs|name lines
+  local spec=$PRESETS grp head item name n=0
+  [[ $spec == *[=,\;:]* ]] || spec=$(printf '%s' "$spec" | sed 's/[[:space:]][[:space:]]*/, /g')
+  while IFS= read -r -d ';' grp; do
+    head=""; n=$((n + 1))
+    if [[ $grp =~ ^[[:space:]]*([^:=,]+):(.*)$ ]] && [[ ${BASH_REMATCH[1]} == *[![:digit:][:space:]]* ]]; then
+      head=$(clean_label "${BASH_REMATCH[1]}"); grp=${BASH_REMATCH[2]}
+    fi
+    while IFS= read -r -d ',' item; do
+      name=""
+      case "$item" in *=*) name=$(clean_label "${item%%=*}"); item=${item#*=} ;; esac
+      parse_time "$item" || continue
+      printf '%s|%s|%s|%s\n' "$n" "$head" "$SECS" "$name"
+    done <<< "$grp,"
+  done <<< "$spec;"
+}
+
+new_json() {  # recents and preset groups for the new-timer window
+  local out="" g="" first n head secs name last=""
+  if [ -s "$RECENT" ]; then
+    g='{"name":"Recent","items":['; first=1
+    while IFS='|' read -r secs name; do
+      case "$secs" in ''|*[!0-9]*) continue ;; esac
+      [ $first -eq 1 ] || g="$g,"; first=0
+      g="$g[$secs,$(json_str "$name")]"
+    done < "$RECENT"
+    out="$g]}"
+  fi
+  while IFS='|' read -r n head secs name; do
+    if [ "$n" != "$last" ]; then
+      [ -n "$last" ] && out="$out${out:+,}$g]}"
+      last=$n; g="{\"name\":$(json_str "$head"),\"items\":["; first=1
+    fi
+    [ $first -eq 1 ] || g="$g,"; first=0
+    g="$g[$secs,$(json_str "$name")]"
+  done < <(preset_list)
+  [ -n "$last" ] && out="$out${out:+,}$g]}"
+  printf '{"groups":[%s]}' "$out"
+}
+
+ask_custom() {  # the retro new-timer window, or the plain dialog if it can't open
+  local reply secs
+  reply=$(osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" new "$(new_json)" 2>"$WINDOW_LOG")
+  case "$reply" in
+    cancel) return ;;
+    start\|*)
+      secs=${reply#start|}
+      case "${secs%%|*}" in ''|*[!0-9]*|0) return ;; esac
+      start_timer "${secs%%|*}" "${secs#*|}"
+      return ;;
+  esac
   reply=$(printf '%s' "$ASK_SCRIPT" | osascript - 2>/dev/null) || exit 0
   if parse_time "$reply"; then
     start_timer "$SECS" "$REST"
@@ -1026,27 +1152,19 @@ bar() {  # elapsed total -> ▰▰▰▱▱▱▱▱▱▱
 # Groups split on ";", an optional "Heading:" starts a group, items split on ",".
 # A plain "1 5 10" list (the v2 format) still works.
 preset_rows() {
-  local p="$1" spec=$PRESETS grp head item name first=1
-  [[ $spec == *[=,\;:]* ]] || spec=$(printf '%s' "$spec" | sed 's/[[:space:]][[:space:]]*/, /g')
-  while IFS= read -r -d ';' grp; do
-    head=""
-    if [[ $grp =~ ^[[:space:]]*([^:=,]+):(.*)$ ]] && [[ ${BASH_REMATCH[1]} == *[![:digit:][:space:]]* ]]; then
-      head=$(clean_label "${BASH_REMATCH[1]}"); grp=${BASH_REMATCH[2]}
+  local p="$1" n head secs name last=""
+  while IFS='|' read -r n head secs name; do
+    if [ "$n" != "$last" ]; then
+      [ -n "$last" ] && echo "${p}---"
+      last=$n
+      [ -n "$head" ] && echo "${p}$(printf '%s' "$head" | tr 'a-z' 'A-Z') | $HEADING"
     fi
-    [ $first -eq 1 ] || echo "${p}---"
-    first=0
-    [ -n "$head" ] && echo "${p}$(printf '%s' "$head" | tr 'a-z' 'A-Z') | $HEADING"
-    while IFS= read -r -d ',' item; do
-      name=""
-      case "$item" in *=*) name=$(clean_label "${item%%=*}"); item=${item#*=} ;; esac
-      parse_time "$item" || continue
-      if [ -n "$name" ]; then
-        echo "${p}$name · $(dur_text "$SECS") | $(action start "$SECS" "$name")"
-      else
-        echo "${p}$(dur_text "$SECS") | $(action start "$SECS") sfimage=timer"
-      fi
-    done <<< "$grp,"
-  done <<< "$spec;"
+    if [ -n "$name" ]; then
+      echo "${p}$name · $(dur_text "$secs") | $(action start "$secs" "$name")"
+    else
+      echo "${p}$(dur_text "$secs") | $(action start "$secs") sfimage=timer"
+    fi
+  done < <(preset_list)
 }
 
 launcher() {  # the "start a timer" rows: recents, presets, Custom…
