@@ -1,6 +1,6 @@
 #!/bin/bash
 # <xbar.title>Menu Bar Timer</xbar.title>
-# <xbar.version>v3.2</xbar.version>
+# <xbar.version>v3.3</xbar.version>
 # <xbar.author>Jason Rueckert</xbar.author>
 # <xbar.author.github>jsonify</xbar.author.github>
 # <xbar.desc>Countdown timer that rings and grabs focus when it's done. Inspired by fferri/bitbar-countdown-timer.</xbar.desc>
@@ -21,6 +21,7 @@ SNOOZE_MIN=5                                    # snooze length; Settings → Sn
 RING_FOR=300                                    # seconds to keep ringing if ignored
 FONT="Menlo"                                    # monospaced so the clock doesn't jiggle
 SHOW="label"                                    # menu bar: label (◕ Tea 4:59), time (◕ 4:59) or icon (◕)
+CLICK="panel"                                   # clicking the timer opens: panel (right-click for the menu) or menu
 HOTKEY="CMD+OPTION+T"                           # opens Custom… from any app; "" to turn off
 CHECK_UPDATES=1                                 # 0 = never look for a newer version on GitHub
 # ---------------------------------------------------------------------------
@@ -33,10 +34,12 @@ esac
 
 STATE_DIR="$HOME/Library/Application Support/menubar-timer"
 STATE="$STATE_DIR/state"        # line 1: running|paused|ringing  line 2: end epoch or secs left  line 3: label  line 4: total secs
-PREFS="$STATE_DIR/prefs"        # KEY=value lines saved by the Settings menu and panel (SOUND, SHOW, SNOOZE_MIN)
+PREFS="$STATE_DIR/prefs"        # KEY=value lines saved by the Settings menu and panel (SOUND, SHOW, SNOOZE_MIN, CLICK)
 RECENT="$STATE_DIR/recent"      # secs|label lines, newest first, at most 5
 ALARM_PID="$STATE_DIR/alarm.pid"
 PANEL_PID="$STATE_DIR/panel.pid"
+PANEL_CLOSED="$STATE_DIR/panel.closed"   # epoch the panel last closed itself (clicked away)
+WINDOW_LOG="$STATE_DIR/window.log"   # errors from the last panel or alarm window
 UPDATE_FILE="$STATE_DIR/update" # line 1: epoch of last check  line 2: newest version on GitHub
 UPDATE_URL="https://raw.githubusercontent.com/jsonify/menubar-timer/main/timer.1s.sh"
 CHECK_EVERY=86400               # seconds between update checks
@@ -52,6 +55,7 @@ load_prefs() {
     case "$k" in
       SOUND) SOUND=$v ;;
       SHOW)  SHOW=$v ;;
+      CLICK) CLICK=$v ;;
       SNOOZE_MIN) case "$v" in ""|*[!0-9]*) ;; *) SNOOZE_MIN=$v ;; esac ;;
     esac
   done < "$PREFS"
@@ -206,7 +210,7 @@ ring() {
   sp=$!
   read_state
   answer=$(osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" alarm \
-    "{\"label\":$(json_str "$LABEL"),\"total\":${TOTAL:-0},\"snooze\":$SNOOZE_MIN,\"ends\":\"$(clock "$(now)")\",\"ringFor\":$RING_FOR}" "$RING_FOR" 2>/dev/null)
+    "{\"label\":$(json_str "$LABEL"),\"total\":${TOTAL:-0},\"snooze\":$SNOOZE_MIN,\"ends\":\"$(clock "$(now)")\",\"ringFor\":$RING_FOR}" "$RING_FOR" 2>"$WINDOW_LOG")
   # If the styled window couldn't open, fall back to a plain dialog (unless the alarm was stopped meanwhile).
   [ -z "$answer" ] && [ -f "$ALARM_PID" ] &&
     answer=$(printf '%s' "$ALARM_SCRIPT" | osascript - "$label" "Snooze $SNOOZE_MIN min" "$RING_FOR" 2>/dev/null)
@@ -294,8 +298,8 @@ install_update() {
 # A small window with an LCD, keys and knobs. It's an HTML page in a WebKit view
 # hosted by osascript (JavaScript for Automation), so it needs nothing installed.
 # The page talks to this script through the "timer" message handler: each
-# message is a command line for the case below, and "status" is polled twice a
-# second to redraw it. The same page, in "alarm" mode, is the window that rings.
+# message is a command line for the case below, and the page fetches
+# menubar-timer://app/status (this script's "status") twice a second to redraw. The same page, in "alarm" mode, is the window that rings.
 read -r -d '' PANEL_JS <<'JXA'
 ObjC.import('Cocoa');
 ObjC.import('WebKit');
@@ -328,17 +332,12 @@ function run(argv) {
     app.terminate(null);
   }
 
-  var web, win, last = '';
-  function push(force) {
-    var s = sh(['status'], true).trim();
-    if (!s || (s === last && !force)) return;
-    last = s;
-    web.evaluateJavaScriptCompletionHandler('MT.render(' + s + ')', null);
-  }
+  var web, win;
 
+  // No "protocols" lists: JXA can only name protocols already loaded in the runtime, and
+  // WKScriptMessageHandler isn't. WebKit and NSWindow only check that the methods exist.
   ObjC.registerSubclass({
     name: 'MTBridge',
-    protocols: ['WKScriptMessageHandler'],
     methods: {
       'userContentController:didReceiveScriptMessage:': {
         types: ['void', ['id', 'id']],
@@ -346,7 +345,6 @@ function run(argv) {
           var a = ObjC.deepUnwrap(msg.body) || [], cmd = a[0];
           if (cmd === 'close') { win.close; return; }
           if (cmd === 'answer') { answer(String(a[1])); return; }
-          if (cmd === 'status') { push(true); return; }
           if (cmd === 'size') {   // grow or shrink to fit the page, keeping the top edge in place
             var f = win.frame, h = Number(a[1]);
             var dh = win.frameRectForContentRect($.NSMakeRect(0, 0, width, h)).size.height - f.size.height;
@@ -354,25 +352,47 @@ function run(argv) {
             return;
           }
           sh(a, cmd !== 'custom');   // Custom… waits on a dialog, so don't block the window
-          push(false);
         }
       }
+    }
+  });
+
+  // The page polls menubar-timer://app/status, answered here with the output of
+  // "timer.1s.sh status". This avoids evaluateJavaScript, whose completion block
+  // JXA can't build (WebKit ships no bridge metadata), so calling it crashes osascript.
+  ObjC.registerSubclass({
+    name: 'MTScheme',
+    methods: {
+      'webView:startURLSchemeTask:': {
+        types: ['void', ['id', 'id']],
+        implementation: function (wv, task) {
+          var body = $(sh(['status'], true).trim() || '{}').dataUsingEncoding(4);
+          task.didReceiveResponse($.NSURLResponse.alloc.initWithURLMIMETypeExpectedContentLengthTextEncodingName(
+            task.request.URL, 'application/json', body.length, 'utf-8'));
+          task.didReceiveData(body);
+          task.didFinish;
+        }
+      },
+      'webView:stopURLSchemeTask:': { types: ['void', ['id', 'id']], implementation: function () {} }
     }
   });
 
   ObjC.registerSubclass({
     name: 'MTTicker',
     methods: { 'tick:': { types: ['void', ['id']], implementation: function () {
-      if (!alarm) return push(false);
       waited += 0.5;
-      if (ringFor && waited >= ringFor) answer('gaveup');
+      if (waited >= ringFor) answer('gaveup');
     } } }
   });
 
   ObjC.registerSubclass({
     name: 'MTWindowDelegate',
-    protocols: ['NSWindowDelegate'],
-    methods: { 'windowWillClose:': { types: ['void', ['id']], implementation: function () { if (alarm) answer('Stop'); else app.terminate(null); } } }
+    methods: {
+      'windowWillClose:': { types: ['void', ['id']], implementation: function () { if (alarm) answer('Stop'); else app.terminate(null); } },
+      // The panel drops down like a menu, so clicking anywhere else puts it away.
+      // The stamp stops the click on the menu bar timer from reopening it straight away.
+      'windowDidResignKey:': { types: ['void', ['id']], implementation: function () { if (!alarm) { sh(['panel-closed'], true); win.close; } } }
+    }
   });
 
   // titled + closable + miniaturizable + full-size content: the page draws under a clear title bar
@@ -381,9 +401,9 @@ function run(argv) {
   win.titleVisibility = 1;
   win.title = 'Menu Timer';
   win.backgroundColor = $.NSColor.colorWithSRGBRedGreenBlueAlpha(0.922, 0.910, 0.882, 1);
-  win.standardWindowButton(2).hidden = true;   // no zoom button
+  [0, 1, 2].forEach(function (b) { win.standardWindowButton(b).hidden = true; });   // the page has its own Close / Stop
+  win.level = 3;                      // floating
   if (alarm) {
-    win.standardWindowButton(1).hidden = true;
     win.level = 25;                   // status-window level: above other apps' windows
     win.collectionBehavior = 1 | 256; // on every Space, and over full-screen apps
   }
@@ -394,22 +414,35 @@ function run(argv) {
   var conf = $.WKWebViewConfiguration.alloc.init;
   var bridge = $.MTBridge.alloc.init;
   conf.userContentController.addScriptMessageHandlerName(bridge, 'timer');
+  var scheme = $.MTScheme.alloc.init;
+  conf.setURLSchemeHandlerForURLScheme(scheme, 'menubar-timer');
   conf.userContentController.addUserScript($.WKUserScript.alloc.initWithSourceInjectionTimeForMainFrameOnly(
     'window.MT_MODE = ' + JSON.stringify(alarm ? 'alarm' : 'panel') + '; window.MT_INIT = ' + init + ';', 0, true));
   web = $.WKWebView.alloc.initWithFrameConfiguration(win.contentView.bounds, conf);
   web.autoresizingMask = 2 | 16;   // width + height sizable
-  web.setValueForKey(false, 'drawsBackground');
+  web.setValueForKey($.NSNumber.numberWithBool(false), 'drawsBackground');
   win.contentView = web;
-  web.loadHTMLStringBaseURL(html, $.NSURL.URLWithString('https://menubar-timer.local/'));
+  web.loadHTMLStringBaseURL(html, $.NSURL.URLWithString('menubar-timer://app/'));
 
-  win.center;
-  if (!alarm) win.setFrameAutosaveName('MenubarTimerPanel');   // reopen where you left it
+  if (alarm) win.center;
+  else {   // drop down from the menu bar, under the pointer (which is on the timer you just clicked)
+    var m = $.NSEvent.mouseLocation, screens = $.NSScreen.screens, vf = $.NSScreen.mainScreen.visibleFrame;
+    for (var i = 0; i < screens.count; i++) {
+      var sf = screens.objectAtIndex(i).frame;
+      if (m.x >= sf.origin.x && m.x < sf.origin.x + sf.size.width && m.y >= sf.origin.y && m.y <= sf.origin.y + sf.size.height) vf = screens.objectAtIndex(i).visibleFrame;
+    }
+    var w = win.frame.size.width;
+    var x = Math.max(vf.origin.x + 6, Math.min(m.x - w / 2, vf.origin.x + vf.size.width - w - 6));
+    win.setFrameTopLeftPoint($.NSMakePoint(x, vf.origin.y + vf.size.height - 4));
+  }
   win.makeKeyAndOrderFront(null);
   win.orderFrontRegardless;
   app.activateIgnoringOtherApps(true);
 
-  var ticker = $.MTTicker.alloc.init;
-  $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.5, ticker, 'tick:', null, true);
+  if (alarm && ringFor) {   // gives up after ring-for seconds
+    var ticker = $.MTTicker.alloc.init;
+    $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.5, ticker, 'tick:', null, true);
+  }
   app.run;
 }
 JXA
@@ -442,7 +475,7 @@ body {
 button { font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; background: none; border: 0; cursor: default; }
 
 /* top strip: sits under the transparent title bar, so it doubles as the drag handle */
-.bar { height: 30px; display: flex; align-items: center; justify-content: space-between; padding-left: 52px; }
+.bar { height: 30px; display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
 .brand b { color: var(--ink); font-weight: 800; }
 .legend { display: flex; gap: 8px; }
 .legend span { display: flex; align-items: center; gap: 3px; color: var(--ink-faint); transition: color .2s; }
@@ -679,7 +712,15 @@ body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
   var ALARM = window.MT_MODE === "alarm";
   if (ALARM) document.body.classList.add("alarm");
   var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.timer;
-  function send() { var a = [].slice.call(arguments).map(String); if (bridge) bridge.postMessage(a); else console.log("send", a.join(" ")); }
+  function send() {
+    var a = [].slice.call(arguments).map(String);
+    if (!bridge) return console.log("send", a.join(" "));
+    bridge.postMessage(a);
+    if (!ALARM) setTimeout(poll, 150);
+  }
+  function poll() {   // the window answers this URL with "timer.1s.sh status"
+    if (bridge) fetch("menubar-timer://app/status").then(function (r) { return r.json(); }).then(function (s) { MT.render(s); }).catch(function () {});
+  }
 
   // ---- seven-segment digits ----
   var W = 20, H = 36, T = 3.6, G = 0.7;
@@ -870,7 +911,7 @@ body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
       renderLcd(); renderKeys(); renderChips(); renderSettings();
     }
   };
-  if (ALARM) startAlarm(window.MT_INIT || {}); else { window.MT.render({}); send("status"); }
+  if (ALARM) startAlarm(window.MT_INIT || {}); else { window.MT.render({}); poll(); setInterval(poll, 500); }
   send("size", document.getElementById("device").offsetHeight);
 })();
 </script>
@@ -886,8 +927,14 @@ panel_open() {
 abs_self() { case "$SELF" in /*) printf '%s' "$SELF" ;; *) printf '%s' "$PWD/$SELF" ;; esac; }
 
 toggle_panel() {  # opens the panel, or closes it if it's already open
+  local closed=0
   if panel_open; then kill "$(cat "$PANEL_PID")" 2>/dev/null; rm -f "$PANEL_PID"; return; fi
-  nohup osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" </dev/null >/dev/null 2>&1 &
+  # Clicking the menu bar timer while the panel is open closes it on the way (it lost focus); don't reopen it.
+  [ -f "$PANEL_CLOSED" ] && read -r closed < "$PANEL_CLOSED"
+  case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
+  rm -f "$PANEL_CLOSED"
+  [ $(( $(now) - closed )) -le 1 ] && return
+  nohup osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" </dev/null >/dev/null 2>"$WINDOW_LOG" &
   echo $! > "$PANEL_PID"
 }
 
@@ -942,6 +989,8 @@ case "$1" in
   set-show)  case "$2" in label|time|icon) set_pref SHOW "$2" ;; esac; exit 0 ;;
   set-snooze) case "$2" in ''|*[!0-9]*|0) exit 1 ;; esac; set_pref SNOOZE_MIN "$2"; exit 0 ;;
   panel)   toggle_panel; exit 0 ;;
+  panel-closed) now > "$PANEL_CLOSED"; rm -f "$PANEL_PID"; exit 0 ;;   # sent by the panel when it closes itself
+  set-click) case "$2" in panel|menu) set_pref CLICK "$2" ;; esac; exit 0 ;;
   status)  status_json; exit 0 ;;
   clear-recent) rm -f "$RECENT"; exit 0 ;;
   check-update) check_update; exit $? ;;
@@ -951,6 +1000,11 @@ esac
 
 # ---- Menu bar rendering (runs every second) --------------------------------
 action() { printf 'bash="%s" param1=%s' "$SELF" "$1"; shift; local i=2; for p in "$@"; do printf ' param%d="%s"' $i "$p"; i=$((i+1)); done; printf ' terminal=false refresh=true'; }
+
+# With CLICK=panel the title line gets the panel as its click action: SwiftBar then runs it
+# on a left-click and keeps this menu for right-click and ⌥-click.
+CLICK_ACTION=""
+[ "$CLICK" = panel ] && CLICK_ACTION=" $(action panel)"
 
 # Colors are "light menu bar,dark menu bar".
 CALM="#0E8F78,#3CCFB0"; SOON="#B86E00,#F2A33A"; LATE="#D93025,#F0605D"
@@ -1028,6 +1082,10 @@ settings_menu() {
   for opt in "label:Label and time" "time:Time only" "icon:Icon only"; do
     echo "----${opt#*:} | $(action set-show "${opt%%:*}")$([ "${opt%%:*}" = "$SHOW" ] && printf ' checked=true')"
   done
+  echo "--Clicking the timer opens | sfimage=cursorarrow.click"
+  for opt in "panel:The panel (right-click for this menu)" "menu:This menu"; do
+    echo "----${opt#*:} | $(action set-click "${opt%%:*}")$([ "${opt%%:*}" = "$CLICK" ] && printf ' checked=true')"
+  done
   echo "--Snooze length | sfimage=zzz"
   for opt in 1 5 10 15; do
     echo "----$opt min | $(action set-snooze "$opt")$([ "$opt" = "$SNOOZE_MIN" ] && printf ' checked=true')"
@@ -1074,9 +1132,9 @@ case "$MODE" in
       *)    title=$time; [ -n "$LABEL" ] && title="$LABEL $time" ;;
     esac
     if [ "$MODE" = paused ]; then
-      echo "$title | sfimage=pause.circle font=$FONT color=gray"
+      echo "$title | sfimage=pause.circle font=$FONT color=gray$CLICK_ACTION"
     else
-      echo "$(pie "$elapsed" "$TOTAL")${title:+ $title} | font=$FONT color=$color"
+      echo "$(pie "$elapsed" "$TOTAL")${title:+ $title} | font=$FONT color=$color$CLICK_ACTION"
     fi
     echo "---"
     [ -n "$LABEL" ] && echo "$LABEL | size=12 color=gray"
@@ -1105,7 +1163,7 @@ case "$MODE" in
     settings_menu
     ;;
   ringing)
-    echo "${LABEL:-$DONE_TEXT} | sfimage=alarm.fill color=$LATE"
+    echo "${LABEL:-$DONE_TEXT} | sfimage=alarm.fill color=$LATE$CLICK_ACTION"
     echo "---"
     [ -n "$LABEL" ] && echo "$LABEL | size=12 color=gray"
     echo "$DONE_TEXT | size=20 color=$LATE"
@@ -1117,7 +1175,7 @@ case "$MODE" in
     panel_item
     ;;
   *)
-    echo "| sfimage=timer"
+    echo "| sfimage=timer$CLICK_ACTION"
     echo "---"
     launcher ""
     echo "---"
