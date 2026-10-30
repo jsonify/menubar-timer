@@ -10,7 +10,8 @@ This is a modern rewrite of [fferri/bitbar-countdown-timer](https://github.com/f
 - The menu opens on a large countdown with a progress bar (`▰▰▰▰▰▰▱▱▱▱  of 15:00`) and the time it ends.
 - Your five most recent timers at the top of the menu, so the ones you actually use are one click away, followed by named presets (**🍅 Pomodoro · 25 min**, **🧠 Deep work · 50 min**) and **Custom…**, which you can also open from any app with **⌘⌥T**
 - **Pause/Resume**, **Add 1 minute**, **Add 5 minutes** and **Cancel**. Hold **⌥** to change the Add items to **Subtract**.
-- A **Settings** menu where you choose the alarm sound (each one plays when you pick it) and what the menu bar shows: label and time, time only, or icon only
+- A **Settings** menu where you choose the alarm sound (each one plays when you pick it), the snooze length, and what the menu bar shows: label and time, time only, or icon only
+- An optional **panel** window with a retro hardware look (see [Panel](#panel)): a green seven-segment LCD, chunky keys, and knobs you drag or scroll to set a timer
 - When it ends:
   - the sound loops
   - an alert pops up in front of your other windows with **Snooze 5 min** and **Stop** buttons
@@ -37,6 +38,23 @@ The alert comes to the front by asking **System Events** to show it. The first t
 
 Also make sure notifications are allowed for SwiftBar under **System Settings → Notifications**.
 
+## Panel
+
+Choose **Open panel** from the menu to get a small window styled like a piece of desk hardware. Choose **Close panel** (or click **Close** in the panel) to put it away. It reopens where you left it.
+
+- **LCD**: the countdown in seven-segment digits, the timer's label, when it ends, a progress strip, and whether it's running, paused or ringing. The **Run / Pause / Ring** lights at the top match.
+- **Keys**:
+  - **Reset** cancels the timer.
+  - The orange key is **Start**, **Pause**, **Resume** or **Stop**, depending on the state.
+  - **+1 Min** adds a minute, and becomes **Snooze** while the alarm rings.
+  - **Edit** opens **Custom…**.
+- **Knobs**: **Hours**, **Minutes** and **Seconds** set the length that **Start** uses. **Snooze** sets the snooze length. Drag a knob up or down, or scroll over it, and double-click it to reset it.
+- **Recent**: your recent timers as buttons. Click one to run it again.
+- **Settings**: what the menu bar shows, and the alarm sound. Use the arrows to step through the sounds, and click the name to hear it.
+- **Keyboard**: Space is the orange key, Esc is Reset, `+` adds a minute, Return is Edit and ⌘W closes the panel.
+
+The panel is a web page in a WebKit window run by `osascript`, and it's built into `timer.1s.sh`, so there's still nothing to install. It reads the timer from `timer.1s.sh status` twice a second and sends clicks back as the commands listed under [Command line](#command-line), so the panel, the menu and the terminal always agree.
+
 ## Custom times
 
 **Custom…** accepts any of these formats. Any text after the time becomes the timer's label.
@@ -56,10 +74,14 @@ Also make sure notifications are allowed for SwiftBar under **System Settings �
 Edit the variables at the top of `timer.1s.sh`:
 
 ```sh
-PRESETS="Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"   # shown below your recent timers; "" for none
+# Presets are "Group: Name=time, Name=time; Group: ...". A time is anything
+# Custom… accepts (a bare number is minutes); the name becomes the label.
+# Your five most recent timers are listed above these; "" shows recents only.
+PRESETS="Focus: 🍅 Pomodoro=25, 🧠 Deep work=50"
 SOUND="/System/Library/Sounds/Glass.aiff"       # default alarm; Settings → Alarm sound overrides it
-SNOOZE_MIN=5                                    # length of the "Snooze" button
+SNOOZE_MIN=5                                    # snooze length; Settings → Snooze length overrides it
 RING_FOR=300                                    # seconds to keep ringing if ignored
+FONT="Menlo"                                    # monospaced so the clock doesn't jiggle
 SHOW="label"                                    # menu bar: label (◕ Tea 4:59), time (◕ 4:59) or icon (◕)
 HOTKEY="CMD+OPTION+T"                           # opens Custom… from any app; "" to turn off
 CHECK_UPDATES=1                                 # 0 = never look for a newer version on GitHub
@@ -73,7 +95,7 @@ Presets are listed under **Recent**, which holds the last five timers you starte
 
 If you never changed `PRESETS`, you get the current default automatically when you update. In v3.1 that means the old Quick group (Tea, Soft eggs, Pasta) is removed, since your recents now fill that role.
 
-Choices you make in the **Settings** menu (alarm sound and menu bar display) are saved in `~/Library/Application Support/menubar-timer/prefs` and take priority over `SOUND` and `SHOW`.
+Choices you make in the **Settings** menu or the panel (alarm sound, snooze length and menu bar display) are saved in `~/Library/Application Support/menubar-timer/prefs` and take priority over `SOUND`, `SNOOZE_MIN` and `SHOW`.
 
 Other built-in sounds you can use for `SOUND`: `Ping`, `Hero`, `Sosumi`, `Submarine`, `Funk`, `Glass` and `Purr`. Run `ls /System/Library/Sounds` to see all of them.
 
@@ -96,6 +118,9 @@ You can control the timer from a terminal or a Shortcut, as well as from the men
 ./timer.1s.sh add 60             # add a minute (add -60 takes one away)
 ./timer.1s.sh snooze "Eggs"      # start a snooze-length timer without adding it to Recent
 ./timer.1s.sh stop               # cancel the timer, or silence a ringing alarm
+./timer.1s.sh set-snooze 10      # make Snooze 10 minutes
+./timer.1s.sh panel              # open the panel, or close it if it's open
+./timer.1s.sh status             # the timer and settings as one line of JSON
 ./timer.1s.sh check-update       # look for a newer version now
 ./timer.1s.sh update             # install the newest version from GitHub
 ```
