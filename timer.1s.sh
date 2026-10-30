@@ -295,8 +295,8 @@ install_update() {
 # A small window with an LCD, keys and knobs. It's an HTML page in a WebKit view
 # hosted by osascript (JavaScript for Automation), so it needs nothing installed.
 # The page talks to this script through the "timer" message handler: each
-# message is a command line for the case below, and "status" is polled twice a
-# second to redraw it. The same page, in "alarm" mode, is the window that rings.
+# message is a command line for the case below, and the page fetches
+# menubar-timer://app/status (this script's "status") twice a second to redraw. The same page, in "alarm" mode, is the window that rings.
 read -r -d '' PANEL_JS <<'JXA'
 ObjC.import('Cocoa');
 ObjC.import('WebKit');
@@ -329,14 +329,7 @@ function run(argv) {
     app.terminate(null);
   }
 
-  var web, win, last = '';
-  function push(force) {
-    var s = sh(['status'], true).trim();
-    if (!s || (s === last && !force)) return;
-    last = s;
-    // WebKit always calls the completion handler, and JXA turns null into a block that throws when called.
-    web.evaluateJavaScriptCompletionHandler('MT.render(' + s + ')', function () {});
-  }
+  var web, win;
 
   // No "protocols" lists: JXA can only name protocols already loaded in the runtime, and
   // WKScriptMessageHandler isn't. WebKit and NSWindow only check that the methods exist.
@@ -349,7 +342,6 @@ function run(argv) {
           var a = ObjC.deepUnwrap(msg.body) || [], cmd = a[0];
           if (cmd === 'close') { win.close; return; }
           if (cmd === 'answer') { answer(String(a[1])); return; }
-          if (cmd === 'status') { push(true); return; }
           if (cmd === 'size') {   // grow or shrink to fit the page, keeping the top edge in place
             var f = win.frame, h = Number(a[1]);
             var dh = win.frameRectForContentRect($.NSMakeRect(0, 0, width, h)).size.height - f.size.height;
@@ -357,18 +349,36 @@ function run(argv) {
             return;
           }
           sh(a, cmd !== 'custom');   // Custom… waits on a dialog, so don't block the window
-          push(false);
         }
       }
+    }
+  });
+
+  // The page polls menubar-timer://app/status, answered here with the output of
+  // "timer.1s.sh status". This avoids evaluateJavaScript, whose completion block
+  // JXA can't build (WebKit ships no bridge metadata), so calling it crashes osascript.
+  ObjC.registerSubclass({
+    name: 'MTScheme',
+    methods: {
+      'webView:startURLSchemeTask:': {
+        types: ['void', ['id', 'id']],
+        implementation: function (wv, task) {
+          var body = $(sh(['status'], true).trim() || '{}').dataUsingEncoding(4);
+          task.didReceiveResponse($.NSURLResponse.alloc.initWithURLMIMETypeExpectedContentLengthTextEncodingName(
+            task.request.URL, 'application/json', body.length, 'utf-8'));
+          task.didReceiveData(body);
+          task.didFinish;
+        }
+      },
+      'webView:stopURLSchemeTask:': { types: ['void', ['id', 'id']], implementation: function () {} }
     }
   });
 
   ObjC.registerSubclass({
     name: 'MTTicker',
     methods: { 'tick:': { types: ['void', ['id']], implementation: function () {
-      if (!alarm) return push(false);
       waited += 0.5;
-      if (ringFor && waited >= ringFor) answer('gaveup');
+      if (waited >= ringFor) answer('gaveup');
     } } }
   });
 
@@ -396,13 +406,15 @@ function run(argv) {
   var conf = $.WKWebViewConfiguration.alloc.init;
   var bridge = $.MTBridge.alloc.init;
   conf.userContentController.addScriptMessageHandlerName(bridge, 'timer');
+  var scheme = $.MTScheme.alloc.init;
+  conf.setURLSchemeHandlerForURLScheme(scheme, 'menubar-timer');
   conf.userContentController.addUserScript($.WKUserScript.alloc.initWithSourceInjectionTimeForMainFrameOnly(
     'window.MT_MODE = ' + JSON.stringify(alarm ? 'alarm' : 'panel') + '; window.MT_INIT = ' + init + ';', 0, true));
   web = $.WKWebView.alloc.initWithFrameConfiguration(win.contentView.bounds, conf);
   web.autoresizingMask = 2 | 16;   // width + height sizable
   web.setValueForKey($.NSNumber.numberWithBool(false), 'drawsBackground');
   win.contentView = web;
-  web.loadHTMLStringBaseURL(html, $.NSURL.URLWithString('https://menubar-timer.local/'));
+  web.loadHTMLStringBaseURL(html, $.NSURL.URLWithString('menubar-timer://app/'));
 
   win.center;
   if (!alarm) win.setFrameAutosaveName('MenubarTimerPanel');   // reopen where you left it
@@ -410,8 +422,10 @@ function run(argv) {
   win.orderFrontRegardless;
   app.activateIgnoringOtherApps(true);
 
-  var ticker = $.MTTicker.alloc.init;
-  $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.5, ticker, 'tick:', null, true);
+  if (alarm && ringFor) {   // gives up after ring-for seconds
+    var ticker = $.MTTicker.alloc.init;
+    $.NSTimer.scheduledTimerWithTimeIntervalTargetSelectorUserInfoRepeats(0.5, ticker, 'tick:', null, true);
+  }
   app.run;
 }
 JXA
@@ -681,7 +695,15 @@ body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
   var ALARM = window.MT_MODE === "alarm";
   if (ALARM) document.body.classList.add("alarm");
   var bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.timer;
-  function send() { var a = [].slice.call(arguments).map(String); if (bridge) bridge.postMessage(a); else console.log("send", a.join(" ")); }
+  function send() {
+    var a = [].slice.call(arguments).map(String);
+    if (!bridge) return console.log("send", a.join(" "));
+    bridge.postMessage(a);
+    if (!ALARM) setTimeout(poll, 150);
+  }
+  function poll() {   // the window answers this URL with "timer.1s.sh status"
+    if (bridge) fetch("menubar-timer://app/status").then(function (r) { return r.json(); }).then(function (s) { MT.render(s); }).catch(function () {});
+  }
 
   // ---- seven-segment digits ----
   var W = 20, H = 36, T = 3.6, G = 0.7;
@@ -872,7 +894,7 @@ body.alarm .panel-only, body:not(.alarm) .alarm-only { display: none; }
       renderLcd(); renderKeys(); renderChips(); renderSettings();
     }
   };
-  if (ALARM) startAlarm(window.MT_INIT || {}); else { window.MT.render({}); send("status"); }
+  if (ALARM) startAlarm(window.MT_INIT || {}); else { window.MT.render({}); poll(); setInterval(poll, 500); }
   send("size", document.getElementById("device").offsetHeight);
 })();
 </script>
