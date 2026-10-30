@@ -21,6 +21,7 @@ SNOOZE_MIN=5                                    # snooze length; Settings → Sn
 RING_FOR=300                                    # seconds to keep ringing if ignored
 FONT="Menlo"                                    # monospaced so the clock doesn't jiggle
 SHOW="label"                                    # menu bar: label (◕ Tea 4:59), time (◕ 4:59) or icon (◕)
+CLICK="panel"                                   # clicking the timer opens: panel (right-click for the menu) or menu
 HOTKEY="CMD+OPTION+T"                           # opens Custom… from any app; "" to turn off
 CHECK_UPDATES=1                                 # 0 = never look for a newer version on GitHub
 # ---------------------------------------------------------------------------
@@ -33,10 +34,11 @@ esac
 
 STATE_DIR="$HOME/Library/Application Support/menubar-timer"
 STATE="$STATE_DIR/state"        # line 1: running|paused|ringing  line 2: end epoch or secs left  line 3: label  line 4: total secs
-PREFS="$STATE_DIR/prefs"        # KEY=value lines saved by the Settings menu and panel (SOUND, SHOW, SNOOZE_MIN)
+PREFS="$STATE_DIR/prefs"        # KEY=value lines saved by the Settings menu and panel (SOUND, SHOW, SNOOZE_MIN, CLICK)
 RECENT="$STATE_DIR/recent"      # secs|label lines, newest first, at most 5
 ALARM_PID="$STATE_DIR/alarm.pid"
 PANEL_PID="$STATE_DIR/panel.pid"
+PANEL_CLOSED="$STATE_DIR/panel.closed"   # epoch the panel last closed itself (clicked away)
 WINDOW_LOG="$STATE_DIR/window.log"   # errors from the last panel or alarm window
 UPDATE_FILE="$STATE_DIR/update" # line 1: epoch of last check  line 2: newest version on GitHub
 UPDATE_URL="https://raw.githubusercontent.com/jsonify/menubar-timer/main/timer.1s.sh"
@@ -53,6 +55,7 @@ load_prefs() {
     case "$k" in
       SOUND) SOUND=$v ;;
       SHOW)  SHOW=$v ;;
+      CLICK) CLICK=$v ;;
       SNOOZE_MIN) case "$v" in ""|*[!0-9]*) ;; *) SNOOZE_MIN=$v ;; esac ;;
     esac
   done < "$PREFS"
@@ -384,7 +387,12 @@ function run(argv) {
 
   ObjC.registerSubclass({
     name: 'MTWindowDelegate',
-    methods: { 'windowWillClose:': { types: ['void', ['id']], implementation: function () { if (alarm) answer('Stop'); else app.terminate(null); } } }
+    methods: {
+      'windowWillClose:': { types: ['void', ['id']], implementation: function () { if (alarm) answer('Stop'); else app.terminate(null); } },
+      // The panel drops down like a menu, so clicking anywhere else puts it away.
+      // The stamp stops the click on the menu bar timer from reopening it straight away.
+      'windowDidResignKey:': { types: ['void', ['id']], implementation: function () { if (!alarm) { sh(['panel-closed'], true); win.close; } } }
+    }
   });
 
   // titled + closable + miniaturizable + full-size content: the page draws under a clear title bar
@@ -393,9 +401,9 @@ function run(argv) {
   win.titleVisibility = 1;
   win.title = 'Menu Timer';
   win.backgroundColor = $.NSColor.colorWithSRGBRedGreenBlueAlpha(0.922, 0.910, 0.882, 1);
-  win.standardWindowButton(2).hidden = true;   // no zoom button
+  [0, 1, 2].forEach(function (b) { win.standardWindowButton(b).hidden = true; });   // the page has its own Close / Stop
+  win.level = 3;                      // floating
   if (alarm) {
-    win.standardWindowButton(1).hidden = true;
     win.level = 25;                   // status-window level: above other apps' windows
     win.collectionBehavior = 1 | 256; // on every Space, and over full-screen apps
   }
@@ -416,8 +424,17 @@ function run(argv) {
   win.contentView = web;
   web.loadHTMLStringBaseURL(html, $.NSURL.URLWithString('menubar-timer://app/'));
 
-  win.center;
-  if (!alarm) win.setFrameAutosaveName('MenubarTimerPanel');   // reopen where you left it
+  if (alarm) win.center;
+  else {   // drop down from the menu bar, under the pointer (which is on the timer you just clicked)
+    var m = $.NSEvent.mouseLocation, screens = $.NSScreen.screens, vf = $.NSScreen.mainScreen.visibleFrame;
+    for (var i = 0; i < screens.count; i++) {
+      var sf = screens.objectAtIndex(i).frame;
+      if (m.x >= sf.origin.x && m.x < sf.origin.x + sf.size.width && m.y >= sf.origin.y && m.y <= sf.origin.y + sf.size.height) vf = screens.objectAtIndex(i).visibleFrame;
+    }
+    var w = win.frame.size.width;
+    var x = Math.max(vf.origin.x + 6, Math.min(m.x - w / 2, vf.origin.x + vf.size.width - w - 6));
+    win.setFrameTopLeftPoint($.NSMakePoint(x, vf.origin.y + vf.size.height - 4));
+  }
   win.makeKeyAndOrderFront(null);
   win.orderFrontRegardless;
   app.activateIgnoringOtherApps(true);
@@ -458,7 +475,7 @@ body {
 button { font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; background: none; border: 0; cursor: default; }
 
 /* top strip: sits under the transparent title bar, so it doubles as the drag handle */
-.bar { height: 30px; display: flex; align-items: center; justify-content: space-between; padding-left: 52px; }
+.bar { height: 30px; display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
 .brand b { color: var(--ink); font-weight: 800; }
 .legend { display: flex; gap: 8px; }
 .legend span { display: flex; align-items: center; gap: 3px; color: var(--ink-faint); transition: color .2s; }
@@ -910,7 +927,13 @@ panel_open() {
 abs_self() { case "$SELF" in /*) printf '%s' "$SELF" ;; *) printf '%s' "$PWD/$SELF" ;; esac; }
 
 toggle_panel() {  # opens the panel, or closes it if it's already open
+  local closed=0
   if panel_open; then kill "$(cat "$PANEL_PID")" 2>/dev/null; rm -f "$PANEL_PID"; return; fi
+  # Clicking the menu bar timer while the panel is open closes it on the way (it lost focus); don't reopen it.
+  [ -f "$PANEL_CLOSED" ] && read -r closed < "$PANEL_CLOSED"
+  case "$closed" in ''|*[!0-9]*) closed=0 ;; esac
+  rm -f "$PANEL_CLOSED"
+  [ $(( $(now) - closed )) -le 1 ] && return
   nohup osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" </dev/null >/dev/null 2>"$WINDOW_LOG" &
   echo $! > "$PANEL_PID"
 }
@@ -966,6 +989,8 @@ case "$1" in
   set-show)  case "$2" in label|time|icon) set_pref SHOW "$2" ;; esac; exit 0 ;;
   set-snooze) case "$2" in ''|*[!0-9]*|0) exit 1 ;; esac; set_pref SNOOZE_MIN "$2"; exit 0 ;;
   panel)   toggle_panel; exit 0 ;;
+  panel-closed) now > "$PANEL_CLOSED"; rm -f "$PANEL_PID"; exit 0 ;;   # sent by the panel when it closes itself
+  set-click) case "$2" in panel|menu) set_pref CLICK "$2" ;; esac; exit 0 ;;
   status)  status_json; exit 0 ;;
   clear-recent) rm -f "$RECENT"; exit 0 ;;
   check-update) check_update; exit $? ;;
@@ -975,6 +1000,11 @@ esac
 
 # ---- Menu bar rendering (runs every second) --------------------------------
 action() { printf 'bash="%s" param1=%s' "$SELF" "$1"; shift; local i=2; for p in "$@"; do printf ' param%d="%s"' $i "$p"; i=$((i+1)); done; printf ' terminal=false refresh=true'; }
+
+# With CLICK=panel the title line gets the panel as its click action: SwiftBar then runs it
+# on a left-click and keeps this menu for right-click and ⌥-click.
+CLICK_ACTION=""
+[ "$CLICK" = panel ] && CLICK_ACTION=" $(action panel)"
 
 # Colors are "light menu bar,dark menu bar".
 CALM="#0E8F78,#3CCFB0"; SOON="#B86E00,#F2A33A"; LATE="#D93025,#F0605D"
@@ -1052,6 +1082,10 @@ settings_menu() {
   for opt in "label:Label and time" "time:Time only" "icon:Icon only"; do
     echo "----${opt#*:} | $(action set-show "${opt%%:*}")$([ "${opt%%:*}" = "$SHOW" ] && printf ' checked=true')"
   done
+  echo "--Clicking the timer opens | sfimage=cursorarrow.click"
+  for opt in "panel:The panel (right-click for this menu)" "menu:This menu"; do
+    echo "----${opt#*:} | $(action set-click "${opt%%:*}")$([ "${opt%%:*}" = "$CLICK" ] && printf ' checked=true')"
+  done
   echo "--Snooze length | sfimage=zzz"
   for opt in 1 5 10 15; do
     echo "----$opt min | $(action set-snooze "$opt")$([ "$opt" = "$SNOOZE_MIN" ] && printf ' checked=true')"
@@ -1098,9 +1132,9 @@ case "$MODE" in
       *)    title=$time; [ -n "$LABEL" ] && title="$LABEL $time" ;;
     esac
     if [ "$MODE" = paused ]; then
-      echo "$title | sfimage=pause.circle font=$FONT color=gray"
+      echo "$title | sfimage=pause.circle font=$FONT color=gray$CLICK_ACTION"
     else
-      echo "$(pie "$elapsed" "$TOTAL")${title:+ $title} | font=$FONT color=$color"
+      echo "$(pie "$elapsed" "$TOTAL")${title:+ $title} | font=$FONT color=$color$CLICK_ACTION"
     fi
     echo "---"
     [ -n "$LABEL" ] && echo "$LABEL | size=12 color=gray"
@@ -1129,7 +1163,7 @@ case "$MODE" in
     settings_menu
     ;;
   ringing)
-    echo "${LABEL:-$DONE_TEXT} | sfimage=alarm.fill color=$LATE"
+    echo "${LABEL:-$DONE_TEXT} | sfimage=alarm.fill color=$LATE$CLICK_ACTION"
     echo "---"
     [ -n "$LABEL" ] && echo "$LABEL | size=12 color=gray"
     echo "$DONE_TEXT | size=20 color=$LATE"
@@ -1141,7 +1175,7 @@ case "$MODE" in
     panel_item
     ;;
   *)
-    echo "| sfimage=timer"
+    echo "| sfimage=timer$CLICK_ACTION"
     echo "---"
     launcher ""
     echo "---"
