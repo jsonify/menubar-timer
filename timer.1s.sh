@@ -1,6 +1,6 @@
 #!/bin/bash
 # <xbar.title>Menu Bar Timer</xbar.title>
-# <xbar.version>v3.2</xbar.version>
+# <xbar.version>v3.3</xbar.version>
 # <xbar.author>Jason Rueckert</xbar.author>
 # <xbar.author.github>jsonify</xbar.author.github>
 # <xbar.desc>Countdown timer that rings and grabs focus when it's done. Inspired by fferri/bitbar-countdown-timer.</xbar.desc>
@@ -37,6 +37,7 @@ PREFS="$STATE_DIR/prefs"        # KEY=value lines saved by the Settings menu and
 RECENT="$STATE_DIR/recent"      # secs|label lines, newest first, at most 5
 ALARM_PID="$STATE_DIR/alarm.pid"
 PANEL_PID="$STATE_DIR/panel.pid"
+WINDOW_LOG="$STATE_DIR/window.log"   # errors from the last panel or alarm window
 UPDATE_FILE="$STATE_DIR/update" # line 1: epoch of last check  line 2: newest version on GitHub
 UPDATE_URL="https://raw.githubusercontent.com/jsonify/menubar-timer/main/timer.1s.sh"
 CHECK_EVERY=86400               # seconds between update checks
@@ -206,7 +207,7 @@ ring() {
   sp=$!
   read_state
   answer=$(osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" alarm \
-    "{\"label\":$(json_str "$LABEL"),\"total\":${TOTAL:-0},\"snooze\":$SNOOZE_MIN,\"ends\":\"$(clock "$(now)")\",\"ringFor\":$RING_FOR}" "$RING_FOR" 2>/dev/null)
+    "{\"label\":$(json_str "$LABEL"),\"total\":${TOTAL:-0},\"snooze\":$SNOOZE_MIN,\"ends\":\"$(clock "$(now)")\",\"ringFor\":$RING_FOR}" "$RING_FOR" 2>"$WINDOW_LOG")
   # If the styled window couldn't open, fall back to a plain dialog (unless the alarm was stopped meanwhile).
   [ -z "$answer" ] && [ -f "$ALARM_PID" ] &&
     answer=$(printf '%s' "$ALARM_SCRIPT" | osascript - "$label" "Snooze $SNOOZE_MIN min" "$RING_FOR" 2>/dev/null)
@@ -336,9 +337,10 @@ function run(argv) {
     web.evaluateJavaScriptCompletionHandler('MT.render(' + s + ')', null);
   }
 
+  // No "protocols" lists: JXA can only name protocols already loaded in the runtime, and
+  // WKScriptMessageHandler isn't. WebKit and NSWindow only check that the methods exist.
   ObjC.registerSubclass({
     name: 'MTBridge',
-    protocols: ['WKScriptMessageHandler'],
     methods: {
       'userContentController:didReceiveScriptMessage:': {
         types: ['void', ['id', 'id']],
@@ -371,7 +373,6 @@ function run(argv) {
 
   ObjC.registerSubclass({
     name: 'MTWindowDelegate',
-    protocols: ['NSWindowDelegate'],
     methods: { 'windowWillClose:': { types: ['void', ['id']], implementation: function () { if (alarm) answer('Stop'); else app.terminate(null); } } }
   });
 
@@ -398,7 +399,7 @@ function run(argv) {
     'window.MT_MODE = ' + JSON.stringify(alarm ? 'alarm' : 'panel') + '; window.MT_INIT = ' + init + ';', 0, true));
   web = $.WKWebView.alloc.initWithFrameConfiguration(win.contentView.bounds, conf);
   web.autoresizingMask = 2 | 16;   // width + height sizable
-  web.setValueForKey(false, 'drawsBackground');
+  web.setValueForKey($.NSNumber.numberWithBool(false), 'drawsBackground');
   win.contentView = web;
   web.loadHTMLStringBaseURL(html, $.NSURL.URLWithString('https://menubar-timer.local/'));
 
@@ -887,7 +888,7 @@ abs_self() { case "$SELF" in /*) printf '%s' "$SELF" ;; *) printf '%s' "$PWD/$SE
 
 toggle_panel() {  # opens the panel, or closes it if it's already open
   if panel_open; then kill "$(cat "$PANEL_PID")" 2>/dev/null; rm -f "$PANEL_PID"; return; fi
-  nohup osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" </dev/null >/dev/null 2>&1 &
+  nohup osascript -l JavaScript -e "$PANEL_JS" "$(abs_self)" "$PANEL_HTML" </dev/null >/dev/null 2>"$WINDOW_LOG" &
   echo $! > "$PANEL_PID"
 }
 

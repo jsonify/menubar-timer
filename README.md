@@ -55,6 +55,8 @@ Choose **Open panel** from the menu to get a small window styled like a piece of
 
 The panel, and the alarm window that opens when a timer ends, are a web page in a WebKit window run by `osascript`, and it's built into `timer.1s.sh`, so there's still nothing to install. It reads the timer from `timer.1s.sh status` twice a second and sends clicks back as the commands listed under [Command line](#command-line), so the panel, the menu and the terminal always agree.
 
+If the panel or the alarm window doesn't open, the reason is written to `~/Library/Application Support/menubar-timer/window.log`.
+
 ## Custom times
 
 **Custom…** accepts any of these formats. Any text after the time becomes the timer's label.
